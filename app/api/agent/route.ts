@@ -9,9 +9,7 @@ export type AgentStepRequest = {
   complexityLevel: string;
   stepIndex: number;
   stepCount: number;
-  /** Server-fetched page text (plain), when URLs were present */
   pageContext?: string;
-  /** Prior steps' condensed outputs */
   priorOutputs?: string;
 };
 
@@ -28,7 +26,7 @@ type AgentStepResponse = {
 const RESPONSE_SCHEMA = [
   "{",
   '  "output_summary": "concise description of what this step produced",',
-  '  "extracted_json": null or object (use keys like source_url, title, sections[], links[], key_facts[])",',
+  '  "extracted_json": null or compact object — avoid huge strings; put long prose in output_summary only",',
   '  "info_summary": null or very short headline when useful",',
   '  "conflict": null or short extraction/content warning",',
   '  "requires_breakpoint": false,',
@@ -37,38 +35,91 @@ const RESPONSE_SCHEMA = [
   "}"
 ].join("\n");
 
-function tryParseJsonObject(raw: string): unknown {
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start < 0 || end < 0 || end <= start) return null;
-  return JSON.parse(raw.slice(start, end + 1));
+function stripCodeFences(s: string): string {
+  let t = s.trim();
+  const m = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/im.exec(t);
+  if (m) t = m[1].trim();
+  return t;
 }
 
-function isAgentStepResponse(value: unknown): value is AgentStepResponse {
-  if (!value || typeof value !== "object") return false;
-  const v = value as Partial<AgentStepResponse>;
-  return typeof v.output_summary === "string" && typeof v.requires_breakpoint === "boolean";
+/** Fix common LLM JSON mistakes (trailing commas before ] or }). */
+function loosenTrailingCommas(json: string): string {
+  let out = json;
+  for (let i = 0; i < 8; i += 1) {
+    const next = out.replace(/,\s*([\]}])/g, "$1");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+function tryParseJsonObject(raw: string): unknown {
+  const cleaned = loosenTrailingCommas(stripCodeFences(raw));
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    /* continue */
+  }
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start < 0 || end < 0 || end <= start) return null;
+  const slice = loosenTrailingCommas(cleaned.slice(start, end + 1));
+  try {
+    return JSON.parse(slice);
+  } catch {
+    return null;
+  }
+}
+
+function coerceAgentResponse(parsed: unknown, rawModelText: string): AgentStepResponse {
+  const fallbackSummary =
+    rawModelText.trim().slice(0, 14_000) || "Empty model response.";
+  if (!parsed || typeof parsed !== "object") {
+    return {
+      output_summary: fallbackSummary,
+      extracted_json: null,
+      info_summary: null,
+      conflict: null,
+      requires_breakpoint: false,
+      breakpoint_title: null,
+      breakpoint_reason: null
+    };
+  }
+  const o = parsed as Record<string, unknown>;
+  const output_summary =
+    typeof o.output_summary === "string" && o.output_summary.trim()
+      ? o.output_summary
+      : fallbackSummary;
+  return {
+    output_summary,
+    extracted_json: "extracted_json" in o ? o.extracted_json : null,
+    info_summary: typeof o.info_summary === "string" ? o.info_summary : null,
+    conflict: typeof o.conflict === "string" ? o.conflict : null,
+    requires_breakpoint: Boolean(o.requires_breakpoint),
+    breakpoint_title: typeof o.breakpoint_title === "string" ? o.breakpoint_title : null,
+    breakpoint_reason: typeof o.breakpoint_reason === "string" ? o.breakpoint_reason : null
+  };
 }
 
 function roleSystemPrompt(agent: string): string {
   const base =
-    "You are one specialist agent in a URL → structured JSON → summary pipeline. Return JSON only matching the schema. No markdown fences.";
+    "You are one specialist agent in a URL → structured JSON → summary pipeline. Output a single JSON object only. No markdown fences. No text before or after the JSON. Valid JSON only: escape inner double-quotes in strings with backslash. Put long narrative text only in output_summary, not inside extracted_json strings.";
   if (agent.includes("parser")) {
-    return `${base}\nFocus on turning noisy page text into clean sections, metadata, and candidate fields for downstream JSON.`;
+    return `${base}\nTurn noisy page text into clean sections and candidate fields; keep extracted_json small.`;
   }
   if (agent === "json-structurer") {
-    return `${base}\nYour extracted_json must be the canonical AI-readable representation: hierarchical sections, links, facts, and provenance per URL if multiple.`;
+    return `${base}\nextracted_json is the canonical tree (sections, links, facts). Prefer short leaf text or omit huge blobs.`;
   }
   if (agent.includes("analyzer")) {
-    return `${base}\nCompare segments, flag gaps, duplicates, or inconsistent facts in extracted_json vs prior steps.`;
+    return `${base}\nCompare segments and flag gaps; keep extracted_json null unless adding a small checklist object.`;
   }
   if (agent === "ref-tracker") {
-    return `${base}\nTrack claims vs sources; note mismatches in conflict when relevant.`;
+    return `${base}\nTrack claims vs sources; keep JSON compact.`;
   }
   if (agent === "summarizer" || agent === "doc-writer") {
-    return `${base}\nProduce a clear info_summary and tight output_summary for humans from structured JSON.`;
+    return `${base}\nProduce info_summary and output_summary for humans.`;
   }
-  return `${base}\nExecute the step described in the label using page context and prior outputs.`;
+  return `${base}\nExecute the step described in the label. If prefetch failed or body is empty, explain once in output_summary; use conflict only on the first agent step that detects it—later steps set conflict to null.`;
 }
 
 export async function POST(req: Request) {
@@ -99,10 +150,14 @@ export async function POST(req: Request) {
     }
 
     const system = [roleSystemPrompt(agent), "Schema:", RESPONSE_SCHEMA].join("\n");
+    const noPrefetch = !pageContext && /https?:\/\//i.test(userInput);
     const user = [
       `Agent id: ${agent}`,
       `Step (${stepIndex + 1} / ${stepCount}): ${label}`,
       `Complexity: ${complexityLevel}`,
+      noPrefetch
+        ? "Note: There is no prefetched page text. If prior agent outputs already state a fetch failure, set conflict to null."
+        : "",
       "",
       "--- Original input (URLs + notes) ---",
       userInput || "(empty)",
@@ -111,9 +166,11 @@ export async function POST(req: Request) {
       managerReasoning || "(none)",
       pageContext
         ? `\n--- Prefetched page text (plain) ---\n${pageContext}`
-        : "\n--- Prefetched page text ---\n(none — user input had no URLs or fetch failed.)",
+        : "\n--- Prefetched page text ---\n(none — no URLs, or fetch failed / empty.)",
       priorOutputs ? `\n--- Prior agent outputs ---\n${priorOutputs}` : ""
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const response = await aiClient.chat.completions.create({
       model: AI_MODEL,
@@ -121,16 +178,16 @@ export async function POST(req: Request) {
         { role: "system", content: system },
         { role: "user", content: user }
       ],
-      max_tokens: 4096
+      max_tokens: 4096,
+      temperature: 0.15
     });
 
     const text = response.choices[0]?.message?.content ?? "";
     const parsed = tryParseJsonObject(text);
-    if (!isAgentStepResponse(parsed)) {
-      return NextResponse.json({ ok: false, error: "Agent step JSON schema validation failed." }, { status: 422 });
-    }
+    const data = coerceAgentResponse(parsed, text);
+    const degraded = parsed === null || parsed === undefined;
 
-    return NextResponse.json({ ok: true, data: parsed });
+    return NextResponse.json({ ok: true, data, degraded });
   } catch (error) {
     return NextResponse.json(
       { ok: false, error: error instanceof Error ? error.message : "Unexpected agent route error." },
