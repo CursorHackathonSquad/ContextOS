@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { aiClient, AI_MODEL } from "@/lib/ai/client";
+import { agentMaxTokens, agentPageContextMaxChars } from "@/lib/ai-latency";
+import { tryParseJsonObject } from "@/lib/json-parse-llm";
 
 export type AgentStepRequest = {
   agent: string;
@@ -34,42 +36,6 @@ const RESPONSE_SCHEMA = [
   '  "breakpoint_reason": null',
   "}"
 ].join("\n");
-
-function stripCodeFences(s: string): string {
-  let t = s.trim();
-  const m = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/im.exec(t);
-  if (m) t = m[1].trim();
-  return t;
-}
-
-/** Fix common LLM JSON mistakes (trailing commas before ] or }). */
-function loosenTrailingCommas(json: string): string {
-  let out = json;
-  for (let i = 0; i < 8; i += 1) {
-    const next = out.replace(/,\s*([\]}])/g, "$1");
-    if (next === out) break;
-    out = next;
-  }
-  return out;
-}
-
-function tryParseJsonObject(raw: string): unknown {
-  const cleaned = loosenTrailingCommas(stripCodeFences(raw));
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    /* continue */
-  }
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start < 0 || end < 0 || end <= start) return null;
-  const slice = loosenTrailingCommas(cleaned.slice(start, end + 1));
-  try {
-    return JSON.parse(slice);
-  } catch {
-    return null;
-  }
-}
 
 function coerceAgentResponse(parsed: unknown, rawModelText: string): AgentStepResponse {
   const fallbackSummary =
@@ -130,7 +96,11 @@ export async function POST(req: Request) {
     const userInput = (body.userInput ?? "").trim();
     const managerReasoning = (body.managerReasoning ?? "").trim();
     const complexityLevel = (body.complexityLevel ?? "medium").trim();
-    const pageContext = (body.pageContext ?? "").trim();
+    let pageContext = (body.pageContext ?? "").trim();
+    const pcMax = agentPageContextMaxChars();
+    if (pageContext.length > pcMax) {
+      pageContext = `${pageContext.slice(0, pcMax)}\n…[page context truncated for latency — raise AGENT_PAGE_CONTEXT_MAX_CHARS if needed]`;
+    }
     const priorOutputs = (body.priorOutputs ?? "").trim();
     const stepIndex = typeof body.stepIndex === "number" ? body.stepIndex : 0;
     const stepCount = typeof body.stepCount === "number" ? body.stepCount : 1;
@@ -178,7 +148,7 @@ export async function POST(req: Request) {
         { role: "system", content: system },
         { role: "user", content: user }
       ],
-      max_tokens: 4096,
+      max_tokens: agentMaxTokens(agent),
       temperature: 0.15
     });
 

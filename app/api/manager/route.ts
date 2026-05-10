@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { aiClient, AI_MODEL } from "@/lib/ai/client";
+import { managerMaxTokens } from "@/lib/ai-latency";
+import { tryParseJsonObject } from "@/lib/json-parse-llm";
 
 type ComplexityLevel = "low" | "medium" | "high" | "extreme";
 
@@ -27,30 +29,6 @@ function inferComplexity(input: string): ComplexityLevel {
   if (len < 1200) return "medium";
   if (len < 2400) return "high";
   return "extreme";
-}
-
-function stripCodeFences(s: string): string {
-  let t = s.trim();
-  const m = /^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/im.exec(t);
-  if (m) t = m[1].trim();
-  return t;
-}
-
-function tryParseJsonObject(raw: string): unknown {
-  const cleaned = stripCodeFences(raw);
-  try {
-    return JSON.parse(cleaned);
-  } catch {
-    /* fall through */
-  }
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start < 0 || end < 0 || end <= start) return null;
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1));
-  } catch {
-    return null;
-  }
 }
 
 function fallbackPlan(input: string): ManagerResponse {
@@ -209,7 +187,7 @@ export async function POST(req: Request) {
         { role: "system", content: system },
         { role: "user", content: user }
       ],
-      max_tokens: 2200,
+      max_tokens: managerMaxTokens(),
       temperature: 0.2
     });
 

@@ -64,9 +64,14 @@ export function Button(
 
 export function Badge({
   tone = "neutral",
+  size = "compact",
+  className,
   children
 }: {
   tone?: "neutral" | "ok" | "warn" | "err" | "info";
+  /** `md` — toolbar chips: shorter than `Button sm`, smaller type than the Input label. */
+  size?: "compact" | "md";
+  className?: string;
   children: React.ReactNode;
 }) {
   const tones = {
@@ -77,8 +82,13 @@ export function Badge({
     info: "border-sky-400/20 bg-sky-500/10 text-sky-200"
   } as const;
 
+  const sizes = {
+    compact: "rounded-lg px-2 py-0.5 text-[11px]",
+    md: "shrink-0 items-center rounded-lg border px-2 py-px text-xs font-medium leading-none"
+  } as const;
+
   return (
-    <span className={cx("inline-flex items-center rounded-lg border px-2 py-0.5 text-[11px] font-medium", tones[tone])}>
+    <span className={cx("inline-flex items-center border font-medium", tones[tone], sizes[size], className)}>
       {children}
     </span>
   );
