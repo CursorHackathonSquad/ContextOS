@@ -44,7 +44,7 @@ export type ResolvedHttpTarget =
   /** Connect using URL host (literal IP); no extra DNS. */
   | { mode: "literal"; url: URL }
   /** Connect to `pinnedIp`; use URL host for Host / TLS SNI (DNS rebinding mitigated). */
-  | { mode: "pinned"; url: URL; pinnedIp: string; family: 4 | 6 };
+  | { mode: "pinned"; url: URL; pinnedIp: string };
 
 /**
  * Validates URL for SSRF and returns how to connect so fetch uses the same resolved IP as the check.
@@ -105,8 +105,7 @@ export async function resolvePublicHttpTarget(urlString: string): Promise<Resolv
   }
 
   const first = records[0];
-  const family: 4 | 6 = first.family === 6 ? 6 : 4;
-  return { mode: "pinned", url, pinnedIp: first.address, family };
+  return { mode: "pinned", url, pinnedIp: first.address };
 }
 
 /**

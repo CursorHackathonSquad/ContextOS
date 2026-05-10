@@ -908,7 +908,13 @@ export function Dashboard() {
               <CardTitle className="flex-wrap">
                 <div className="flex flex-wrap items-center gap-2">
                   <span>Activity</span>
-                  <Badge tone={state.isBreakpointPending ? "warn" : "info"}>{state.isBreakpointPending ? "breakpoint" : "running"}</Badge>
+                  <Badge
+                    tone={
+                      state.isBreakpointPending ? "warn" : state.isRunning ? "info" : "neutral"
+                    }
+                  >
+                    {state.isBreakpointPending ? "breakpoint" : state.isRunning ? "running" : "idle"}
+                  </Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Button variant="secondary" size="sm" onClick={() => setMemoryModalOpen(true)}>
