@@ -13,6 +13,8 @@ function createSsrfBlockList(): net.BlockList {
   b.addSubnet("192.168.0.0", 16, "ipv4");
   b.addSubnet("169.254.0.0", 16, "ipv4");
   b.addSubnet("0.0.0.0", 8, "ipv4");
+  /** IPv4-mapped IPv6 (::ffff:x.x.x.x); covers SSRF via literals like ::ffff:127.0.0.1 */
+  b.addSubnet("::ffff:0.0.0.0", 96, "ipv6");
   b.addAddress("::1", "ipv6");
   b.addSubnet("fe80::", 10, "ipv6");
   b.addSubnet("fc00::", 7, "ipv6");
@@ -38,11 +40,16 @@ function isBlockedHostname(host: string): boolean {
   return false;
 }
 
+export type ResolvedHttpTarget =
+  /** Connect using URL host (literal IP); no extra DNS. */
+  | { mode: "literal"; url: URL }
+  /** Connect to `pinnedIp`; use URL host for Host / TLS SNI (DNS rebinding mitigated). */
+  | { mode: "pinned"; url: URL; pinnedIp: string };
+
 /**
- * Throws if `urlString` is not a safe http(s) URL for server-side fetch (SSRF guard).
- * Resolves DNS for names and checks every returned address.
+ * Validates URL for SSRF and returns how to connect so fetch uses the same resolved IP as the check.
  */
-export async function assertPublicHttpUrl(urlString: string): Promise<void> {
+export async function resolvePublicHttpTarget(urlString: string): Promise<ResolvedHttpTarget> {
   let url: URL;
   try {
     url = new URL(urlString);
@@ -69,14 +76,14 @@ export async function assertPublicHttpUrl(urlString: string): Promise<void> {
     if (isBlockedIpLiteral(host, 4)) {
       throw new Error("IPv4 address is in a blocked range");
     }
-    return;
+    return { mode: "literal", url };
   }
 
   if (net.isIPv6(host)) {
     if (isBlockedIpLiteral(host, 6)) {
       throw new Error("IPv6 address is in a blocked range");
     }
-    return;
+    return { mode: "literal", url };
   }
 
   let records: LookupAddress[];
@@ -96,4 +103,14 @@ export async function assertPublicHttpUrl(urlString: string): Promise<void> {
       throw new Error(`Hostname resolves to a blocked address (${r.address})`);
     }
   }
+
+  const first = records[0];
+  return { mode: "pinned", url, pinnedIp: first.address };
+}
+
+/**
+ * Throws if `urlString` is not a safe http(s) URL for server-side fetch (SSRF guard).
+ */
+export async function assertPublicHttpUrl(urlString: string): Promise<void> {
+  await resolvePublicHttpTarget(urlString);
 }

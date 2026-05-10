@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
+import { fetchPinnedHttpGet } from "@/lib/fetch-pinned";
 import { extractUrls } from "@/lib/extract-urls";
 import { htmlToPlainText } from "@/lib/html-to-text";
-import { assertPublicHttpUrl } from "@/lib/ssrf-guard";
+import { resolvePublicHttpTarget } from "@/lib/ssrf-guard";
 
 export type FetchedPage = {
   url: string;
@@ -65,41 +66,43 @@ async function fetchOneAttempt(originalUrl: string, attemptMs: number): Promise<
   let current = originalUrl;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    let resolved;
     try {
-      await assertPublicHttpUrl(current);
+      resolved = await resolvePublicHttpTarget(current);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "URL blocked";
       return { url: originalUrl, ok: false, error: `SSRF blocked: ${msg}` };
     }
 
     try {
-      const res = await fetch(current, {
-        headers: {
-          "User-Agent": UA,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Cache-Control": "no-cache"
-        },
-        signal: outerSignal,
-        redirect: "manual",
-        cache: "no-store"
+      const res = await fetchPinnedHttpGet(resolved, outerSignal, {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache"
       });
 
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get("location");
+      if (res.statusCode >= 300 && res.statusCode < 400) {
+        const locRaw = res.headers.location;
+        const loc = Array.isArray(locRaw) ? locRaw[0] : locRaw;
         if (!loc) {
-          return { url: originalUrl, ok: false, error: `Redirect ${res.status} without Location header` };
+          return {
+            url: originalUrl,
+            ok: false,
+            error: `Redirect ${res.statusCode} without Location header`
+          };
         }
         current = new URL(loc, current).href;
         continue;
       }
 
-      const raw = await res.text();
+      const raw = res.body;
       const titleMatch = raw.match(/<title[^>]*>([^<]*)<\/title>/i);
       const title = titleMatch?.[1]?.trim();
       const maxChars = 100_000;
       const text = htmlToPlainText(raw).slice(0, maxChars);
-      return { url: originalUrl, ok: res.ok, status: res.status, title, text };
+      const ok = res.statusCode >= 200 && res.statusCode < 300;
+      return { url: originalUrl, ok, status: res.statusCode, title, text };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (/abort|timeout/i.test(msg)) {
@@ -178,10 +181,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: true, data: { urls: [], pages: [] as FetchedPage[], budget_ms: budgetMs } });
     }
 
-    const urlCount = urls.length;
     const attemptsPerUrl = maxRetries() + 1;
-    /** Worst-case if every attempt runs full duration: split total budget across all attempts. */
-    const fairShare = Math.floor(budgetMs / (urlCount * attemptsPerUrl));
+    /** Parallel fetches: wall time ~ slowest URL — split budget by attempts only (not × URL count). */
+    const fairShare = Math.floor(budgetMs / attemptsPerUrl);
     const attemptBudgetMs = Math.min(timeoutMs(), Math.max(500, fairShare));
 
     /** Parallel URL fetches — wall time ~ max(url) instead of sum(url) within the same budget caps. */
