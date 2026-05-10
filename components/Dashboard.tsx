@@ -339,7 +339,18 @@ export function Dashboard() {
         data?: { pages: Array<{ url: string; ok: boolean; title?: string; text?: string; error?: string }> };
       };
       if (fc.ok && fcPayload.ok && fcPayload.data?.pages?.length) {
-        pageContext = fcPayload.data.pages
+        const pages = fcPayload.data.pages;
+        const allFailed = pages.every((p) => !p.ok || !(p.text?.length ?? 0));
+        if (allFailed) {
+          pushTrace({
+            actor: "system",
+            kind: "action",
+            title: "URL prefetch failed",
+            detail:
+              "Servers timed out or blocked the scrape. Try again, paste excerpt/HTML below the URL, or set FETCH_TIMEOUT_MS / FETCH_MAX_RETRIES on the server."
+          });
+        }
+        pageContext = pages
           .map((p) => {
             const head = p.ok ? `${p.url}${p.title ? ` — ${p.title}` : ""}` : `${p.url} (fetch failed)`;
             const body = p.ok ? p.text ?? "" : p.error ?? "";
