@@ -29,14 +29,6 @@ export function PlayIcon(props: IconProps) {
   );
 }
 
-export function PauseIcon(props: IconProps) {
-  return (
-    <svg {...baseProps(props)} stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M7 6h3v12H7zM14 6h3v12h-3z" />
-    </svg>
-  );
-}
-
 export function ResetIcon(props: IconProps) {
   return (
     <svg {...baseProps(props)} stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
@@ -47,6 +39,14 @@ export function ResetIcon(props: IconProps) {
         strokeLinejoin="round"
         d="M20 9a8 8 0 0 0-14.8-3M4 15a8 8 0 0 0 14.8 3"
       />
+    </svg>
+  );
+}
+
+export function XIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props)} stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M18 6L6 18M6 6l12 12" />
     </svg>
   );
 }
@@ -64,22 +64,6 @@ export function LockIcon(props: IconProps) {
         strokeLinejoin="round"
         d="M6.5 10h11a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17.5 21h-11A1.5 1.5 0 0 1 5 19.5v-8A1.5 1.5 0 0 1 6.5 10z"
       />
-    </svg>
-  );
-}
-
-export function BoltIcon(props: IconProps) {
-  return (
-    <svg {...baseProps(props)} stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13 2L4 14h7l-1 8 10-13h-7l0-7z" />
-    </svg>
-  );
-}
-
-export function ChevronDownIcon(props: IconProps) {
-  return (
-    <svg {...baseProps(props)} stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-      <path strokeLinecap="round" strokeLinejoin="round" d="M6 9l6 6 6-6" />
     </svg>
   );
 }

@@ -2,7 +2,7 @@
   "name": "contextos",
   "version": "0.1.0",
   "private": true,
-  "description": "ContextOS — multi-agent runtime dashboard (Next.js): Claude Manager API + mocked downstream agents.",
+  "description": "OsanoAI — multi-agent runtime dashboard (Next.js).",
   "keywords": [
     "nextjs",
     "multi-agent",
