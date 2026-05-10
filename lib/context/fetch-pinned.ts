@@ -1,7 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import type { ResolvedHttpTarget } from "@/lib/ssrf-guard";
+import type { ResolvedHttpTarget } from "@/lib/net/ssrf-guard";
 
 const MAX_RAW_BYTES = 2 * 1024 * 1024;
 

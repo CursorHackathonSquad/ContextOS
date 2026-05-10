@@ -1,8 +1,10 @@
-import { NextResponse } from "next/server";
-import { fetchPinnedHttpGet } from "@/lib/fetch-pinned";
-import { extractUrls } from "@/lib/extract-urls";
-import { htmlToPlainText } from "@/lib/html-to-text";
-import { resolvePublicHttpTarget } from "@/lib/ssrf-guard";
+/**
+ * URL fetch pipeline for orchestrator URL prefetch (bounded parallelism, SSRF guard, HTML → text).
+ */
+
+import { fetchPinnedHttpGet } from "@/lib/context/fetch-pinned";
+import { htmlToPlainText } from "@/lib/parsing/html-to-text";
+import { resolvePublicHttpTarget } from "@/lib/net/ssrf-guard";
 
 export type FetchedPage = {
   url: string;
@@ -13,37 +15,31 @@ export type FetchedPage = {
   error?: string;
 };
 
-/** Many CDNs / anti-bot stacks behave better with a browser UA than a generic scraper string. */
-const UA =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 ContextOS/1.0";
+export const FETCH_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OsanoAI/1.0";
 
 const MAX_REDIRECTS = 8;
 
-/** Upper bound on URLs per request (after SSRF checks each is still expensive). */
-function maxUrlsPerRequest(): number {
+export function maxUrlsPerRequest(): number {
   const raw = process.env.FETCH_MAX_URLS;
   const n = raw ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 1 && n <= 50 ? n : 12;
 }
 
-/**
- * Total wall-clock budget for this POST handler (all URLs, all retries, all redirect hops).
- * Set low on Vercel (e.g. FETCH_CONTEXT_BUDGET_MS=9500 on Hobby 10s functions).
- */
-function fetchContextBudgetMs(): number {
+export function fetchContextBudgetMs(): number {
   const raw = process.env.FETCH_CONTEXT_BUDGET_MS;
   const n = raw ? Number.parseInt(raw, 10) : NaN;
   if (Number.isFinite(n) && n >= 3_000) return n;
   return 120_000;
 }
 
-function timeoutMs(): number {
+export function fetchTimeoutMs(): number {
   const raw = process.env.FETCH_TIMEOUT_MS;
   const n = raw ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 3_000 ? n : 55_000;
 }
 
-function maxRetries(): number {
+export function fetchMaxRetries(): number {
   const raw = process.env.FETCH_MAX_RETRIES;
   const n = raw ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n >= 0 && n <= 5 ? n : 2;
@@ -53,10 +49,6 @@ function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * One outer "attempt" (including all redirect hops) shares a single AbortSignal so
- * cumulative time cannot exceed `attemptMs`.
- */
 async function fetchOneAttempt(originalUrl: string, attemptMs: number): Promise<FetchedPage> {
   if (attemptMs < 500) {
     return { url: originalUrl, ok: false, error: "FETCH_CONTEXT_BUDGET_EXHAUSTED" };
@@ -76,7 +68,7 @@ async function fetchOneAttempt(originalUrl: string, attemptMs: number): Promise<
 
     try {
       const res = await fetchPinnedHttpGet(resolved, outerSignal, {
-        "User-Agent": UA,
+        "User-Agent": FETCH_UA,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache"
@@ -131,7 +123,7 @@ async function fetchOne(
   url: string,
   opts: { deadline: number; attemptBudgetMs: number }
 ): Promise<FetchedPage> {
-  const retries = maxRetries();
+  const retries = fetchMaxRetries();
   let last: FetchedPage = { url, ok: false, error: "fetch never attempted" };
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -145,7 +137,6 @@ async function fetchOne(
       return { url, ok: false, error: "FETCH_CONTEXT_BUDGET_EXHAUSTED" };
     }
 
-    /** Keep small; retry backoff is not included in fairShare budget math. */
     if (attempt > 0 && remaining > attemptMs + 800) {
       await delay(Math.min(250 * attempt, 800));
     }
@@ -162,53 +153,59 @@ async function fetchOne(
   return last;
 }
 
-export async function POST(req: Request) {
+/** Parallel fetch of URLs extracted from task text (orchestrator prefetch). */
+export async function fetchPagesFromInput(input: string): Promise<{
+  urls: string[];
+  pages: FetchedPage[];
+  budget_ms: number;
+  attempt_budget_ms_cap: number;
+  urls_truncated: boolean;
+}> {
+  const { extractUrls } = await import("@/lib/context/extract-urls");
   const budgetMs = fetchContextBudgetMs();
   const deadline = Date.now() + budgetMs;
 
-  try {
-    const { input } = (await req.json()) as { input?: string };
-    const text = (input ?? "").trim();
-    let urls = extractUrls(text);
-    const maxU = maxUrlsPerRequest();
-    let urlsTruncated = false;
-    if (urls.length > maxU) {
-      urls = urls.slice(0, maxU);
-      urlsTruncated = true;
-    }
-
-    if (urls.length === 0) {
-      return NextResponse.json({ ok: true, data: { urls: [], pages: [] as FetchedPage[], budget_ms: budgetMs } });
-    }
-
-    const attemptsPerUrl = maxRetries() + 1;
-    /** Parallel fetches: wall time ~ slowest URL — split budget by attempts only (not × URL count). */
-    const fairShare = Math.floor(budgetMs / attemptsPerUrl);
-    const attemptBudgetMs = Math.min(timeoutMs(), Math.max(500, fairShare));
-
-    /** Parallel URL fetches — wall time ~ max(url) instead of sum(url) within the same budget caps. */
-    const pages: FetchedPage[] = await Promise.all(
-      urls.map((u) =>
-        Date.now() >= deadline
-          ? Promise.resolve({ url: u, ok: false, error: "FETCH_CONTEXT_BUDGET_EXHAUSTED" })
-          : fetchOne(u, { deadline, attemptBudgetMs })
-      )
-    );
-
-    return NextResponse.json({
-      ok: true,
-      data: {
-        urls,
-        pages,
-        budget_ms: budgetMs,
-        attempt_budget_ms_cap: attemptBudgetMs,
-        urls_truncated: urlsTruncated
-      }
-    });
-  } catch (error) {
-    return NextResponse.json(
-      { ok: false, error: error instanceof Error ? error.message : "fetch-context failed." },
-      { status: 500 }
-    );
+  let urls = extractUrls(input);
+  const maxU = maxUrlsPerRequest();
+  let urlsTruncated = false;
+  if (urls.length > maxU) {
+    urls = urls.slice(0, maxU);
+    urlsTruncated = true;
   }
+
+  if (urls.length === 0) {
+    return { urls: [], pages: [], budget_ms: budgetMs, attempt_budget_ms_cap: 0, urls_truncated: false };
+  }
+
+  const attemptsPerUrl = fetchMaxRetries() + 1;
+  const fairShare = Math.floor(budgetMs / attemptsPerUrl);
+  const attemptBudgetMs = Math.min(fetchTimeoutMs(), Math.max(500, fairShare));
+
+  const pages: FetchedPage[] = await Promise.all(
+    urls.map((u) =>
+      Date.now() >= deadline
+        ? Promise.resolve({ url: u, ok: false, error: "FETCH_CONTEXT_BUDGET_EXHAUSTED" })
+        : fetchOne(u, { deadline, attemptBudgetMs })
+    )
+  );
+
+  return {
+    urls,
+    pages,
+    budget_ms: budgetMs,
+    attempt_budget_ms_cap: attemptBudgetMs,
+    urls_truncated: urlsTruncated
+  };
+}
+
+/** Plaintext blob for orchestrator context key `urls_fetched`. */
+export function pagesToContextText(pages: FetchedPage[]): string {
+  if (!pages.length) return "";
+  return pages
+    .map((p) => {
+      const head = p.ok ? `${p.url}${p.title ? ` — ${p.title}` : ""}` : `${p.url} (fetch failed)`;
+      const body = p.ok ? p.text ?? "" : p.error ?? "";
+      return `=== ${head} ===\n${body}`;
+    })
+    .join("\n\n");
 }
