@@ -61,6 +61,13 @@ function greek(index: number) {
 
 function displayAgentName(id: string) {
   if (id === "manager") return "Manager";
+  if (id === "json-structurer") return "JSON structurer";
+  if (id === "summarizer") return "Summarizer";
+  if (id.startsWith("worker-")) {
+    const n = Number(id.split("-")[1] ?? "1");
+    const idx = Math.max(n - 1, 0);
+    return `Worker ${greek(idx)}`;
+  }
   if (id === "ref-tracker") return "Reference Tracker";
   if (id === "doc-writer") return "Documentation Writer";
   if (id.startsWith("parser-")) {
@@ -153,6 +160,8 @@ function createInitialState() {
       final_report: "empty"
     } as Record<VaultObject, VaultStatus>,
     conflicts: [] as string[],
+    structuredJson: null as unknown | null,
+    lastInfoSummary: "",
     trace: [
       {
         id: uid("tr"),
@@ -160,7 +169,7 @@ function createInitialState() {
         actor: "system",
         kind: "action",
         title: "Runtime initialized",
-        detail: "Awaiting input. Manager API integration ready."
+        detail: "Paste URLs → Manager plans agents → pages are fetched server-side → structured JSON + summary."
       }
     ] as TraceEvent[],
     memory: [] as MemoryItem[],
@@ -218,10 +227,6 @@ export function Dashboard() {
     setState((s) => ({ ...s, vault: { ...s.vault, [key]: status } }));
   }
 
-  async function wait(ms: number) {
-    await new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
   function ensureAgentsFromPlan(plan: SpawnStep[], contextAccess: Record<string, ContextAccess>) {
     const nextAgents: Record<string, AgentStatus> = { manager: "running" };
     const born: Record<string, number> = { ...state.bornAgents };
@@ -249,7 +254,17 @@ export function Dashboard() {
   }
 
   async function runManager() {
-    setState((s) => ({ ...s, isRunning: true, isManagerLoading: true, isBreakpointPending: false, pendingBreakpoint: null, nextStepIndex: 0 }));
+    setState((s) => ({
+      ...s,
+      isRunning: true,
+      isManagerLoading: true,
+      isBreakpointPending: false,
+      pendingBreakpoint: null,
+      nextStepIndex: 0,
+      conflicts: [],
+      structuredJson: null,
+      lastInfoSummary: ""
+    }));
     setAgentStatus("manager", "running");
     setVault("raw_input", "created");
     pushTrace({ actor: "manager", kind: "action", title: "Manager started", detail: "Input sent to Manager API." });
@@ -306,12 +321,36 @@ export function Dashboard() {
   async function continueExecution(fromIndex = state.nextStepIndex) {
     const steps = state.spawnPlan.filter((step) => step.agent !== "manager");
     if (!state.isRunning) return;
-    const conflictLabels = [
-      "Low analyzer confidence",
-      "Citation mismatch",
-      "Policy edge reached",
-      "Unresolved source conflict"
-    ];
+
+    const inputText = state.inputText;
+    const managerReasoning = state.managerReasoning;
+    const complexityLevel = state.complexityLevel;
+    let priorOutputs = "";
+
+    let pageContext = "";
+    try {
+      const fc = await fetch("/api/fetch-context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: inputText })
+      });
+      const fcPayload = (await fc.json()) as {
+        ok: boolean;
+        data?: { pages: Array<{ url: string; ok: boolean; title?: string; text?: string; error?: string }> };
+      };
+      if (fc.ok && fcPayload.ok && fcPayload.data?.pages?.length) {
+        pageContext = fcPayload.data.pages
+          .map((p) => {
+            const head = p.ok ? `${p.url}${p.title ? ` — ${p.title}` : ""}` : `${p.url} (fetch failed)`;
+            const body = p.ok ? p.text ?? "" : p.error ?? "";
+            return `=== ${head} ===\n${body}`;
+          })
+          .join("\n\n");
+        if (pageContext.length > 120_000) pageContext = `${pageContext.slice(0, 120_000)}\n…[truncated]`;
+      }
+    } catch {
+      pageContext = "";
+    }
 
     for (let i = fromIndex; i < steps.length; i += 1) {
       const step = steps[i];
@@ -325,39 +364,109 @@ export function Dashboard() {
         setVault("parsed_json", "granted");
         setVault("metadata", "granted");
       }
+      if (step.agent === "json-structurer") {
+        setVault("parsed_json", "granted");
+      }
       if (step.agent.includes("analyzer")) {
         setVault("analysis_scratchpad", "granted");
       }
       if (step.agent === "ref-tracker") {
         setVault("provenance_graph", "granted");
       }
-      if (step.agent === "doc-writer") {
+      if (step.agent === "summarizer" || step.agent === "doc-writer") {
         setVault("report_draft", "granted");
       }
 
-      await wait(380);
-      if (i < conflictLabels.length) {
-        const conflict = conflictLabels[i];
-        pushTrace({ actor: step.agent, kind: "conflict", title: `CONFLICT: ${conflict}`, detail: "Injected runtime conflict for demo observability." });
-        pushMemory({ kind: "conflict", title: conflict, detail: `${displayAgentName(step.agent)} reported runtime uncertainty.` });
-        setState((s) => ({ ...s, conflicts: [...s.conflicts, conflict] }));
-      }
-      if (i === 2) {
+      try {
+        const res = await fetch("/api/agent", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent: step.agent,
+            label: step.label,
+            userInput: inputText,
+            managerReasoning,
+            complexityLevel,
+            pageContext,
+            priorOutputs,
+            stepIndex: i,
+            stepCount: steps.length
+          })
+        });
+        const payload = (await res.json()) as {
+          ok: boolean;
+          data?: {
+            output_summary: string;
+            extracted_json: unknown | null;
+            info_summary: string | null;
+            conflict: string | null;
+            requires_breakpoint: boolean;
+            breakpoint_title: string | null;
+            breakpoint_reason: string | null;
+          };
+          error?: string;
+        };
+        if (!res.ok || !payload.ok || !payload.data) {
+          throw new Error(payload.error ?? "Agent step failed.");
+        }
+        const data = payload.data;
+        const jsonSnip =
+          data.extracted_json != null
+            ? `\nextracted_json: ${JSON.stringify(data.extracted_json).slice(0, 4000)}${JSON.stringify(data.extracted_json).length > 4000 ? "…" : ""}`
+            : "";
+        priorOutputs += `\n\n### ${step.agent}\n${data.output_summary}${jsonSnip}`;
         pushTrace({
-          actor: "system",
-          kind: "breakpoint",
-          title: "BREAKPOINT: Policy edge reached",
-          detail: "Approve to continue after conflict escalation."
+          actor: step.agent,
+          kind: "action",
+          title: `${displayAgentName(step.agent)} completed`,
+          detail:
+            data.output_summary.length > 1200 ? `${data.output_summary.slice(0, 1200)}…` : data.output_summary
         });
         setState((s) => ({
           ...s,
-          isBreakpointPending: true,
-          pendingBreakpoint: { id: "bp-conflict", title: "Policy edge reached", reason: "Conflict escalation requires human approval.", after_step: i + 1 },
-          nextStepIndex: i + 1
+          structuredJson: data.extracted_json != null ? data.extracted_json : s.structuredJson,
+          lastInfoSummary: data.info_summary?.trim() ? data.info_summary.trim() : s.lastInfoSummary
         }));
-        setAgentStatus(step.agent, "blocked");
+        if (data.conflict) {
+          pushTrace({
+            actor: step.agent,
+            kind: "conflict",
+            title: `CONFLICT: ${data.conflict}`,
+            detail: data.output_summary
+          });
+          pushMemory({
+            kind: "conflict",
+            title: data.conflict,
+            detail: `${displayAgentName(step.agent)} reported an extraction or content issue.`
+          });
+          setState((s) => ({ ...s, conflicts: [...s.conflicts, data.conflict!] }));
+        }
+        if (data.requires_breakpoint) {
+          const title = data.breakpoint_title ?? "Human review required";
+          const reason = data.breakpoint_reason ?? "Agent requested a checkpoint.";
+          pushTrace({ actor: "system", kind: "breakpoint", title: `BREAKPOINT: ${title}`, detail: reason });
+          pushMemory({ kind: "intervention", title: "Breakpoint triggered", detail: `${title} — ${reason}` });
+          setState((s) => ({
+            ...s,
+            isBreakpointPending: true,
+            pendingBreakpoint: { id: uid("bp"), title, reason, after_step: i + 1 },
+            nextStepIndex: i + 1
+          }));
+          setAgentStatus(step.agent, "blocked");
+          return;
+        }
+      } catch (error) {
+        setAgentStatus(step.agent, "err");
+        pushTrace({
+          actor: step.agent,
+          kind: "action",
+          title: `${displayAgentName(step.agent)} failed`,
+          detail: error instanceof Error ? error.message : "Unknown error"
+        });
+        setState((s) => ({ ...s, isRunning: false }));
         return;
       }
+
       setAgentStatus(step.agent, "ok");
       setState((s) => ({ ...s, nextStepIndex: i + 1 }));
     }
@@ -369,18 +478,25 @@ export function Dashboard() {
       ...s,
       isRunning: false,
       output: {
-        title: "Final report generated",
-        summary: `Complexity ${s.complexityLevel.toUpperCase()} with ${s.conflicts.length} conflict event(s).`,
+        title: "Structured ingest complete",
+        summary: `${s.lastInfoSummary || `Complexity ${s.complexityLevel.toUpperCase()} — pipeline finished.`}`,
         sections: [
-          { h: "Reasoning", p: s.managerReasoning },
-          { h: "Spawned agents", p: Object.keys(s.agents).map(displayAgentName).join(", ") },
-          { h: "Conflicts", p: s.conflicts.join(" | ") || "None" },
-          { h: "Rationale", p: "Human breakpoints and context ACLs keep execution debuggable and safe." }
+          { h: "Info summary", p: s.lastInfoSummary || "See trace and JSON artifact below." },
+          {
+            h: "AI-readable JSON (latest structurer output)",
+            p:
+              s.structuredJson != null
+                ? JSON.stringify(s.structuredJson, null, 2).slice(0, 3500) +
+                  (JSON.stringify(s.structuredJson).length > 3500 ? "…" : "")
+                : "No extracted_json returned — check agent responses in the trace."
+          },
+          { h: "Manager reasoning", p: s.managerReasoning.slice(0, 1800) + (s.managerReasoning.length > 1800 ? "…" : "") },
+          { h: "Conflicts", p: s.conflicts.join(" | ") || "None" }
         ]
       }
     }));
-    pushTrace({ actor: "system", kind: "action", title: "Execution complete", detail: "Final report generated." });
-    pushMemory({ kind: "decision", title: "Final report generated", detail: "Pipeline completed with conflict-aware checkpoints." });
+    pushTrace({ actor: "system", kind: "action", title: "Execution complete", detail: "Final structured JSON + summary ready." });
+    pushMemory({ kind: "decision", title: "Ingest finished", detail: "URL text fetched server-side; agents produced JSON + summary." });
   }
 
   async function approveBreakpoint() {
@@ -402,20 +518,20 @@ export function Dashboard() {
     const plan: SpawnStep[] =
       preset === "fast"
         ? [
-            { step: 1, agent: "manager", label: "Analyze input quickly" },
-            { step: 2, agent: "parser-1", label: "Fast parse" },
-            { step: 3, agent: "analyzer-1", label: "Fast analysis" },
-            { step: 4, agent: "doc-writer", label: "Write report" }
+            { step: 1, agent: "manager", label: "Plan URL ingest" },
+            { step: 2, agent: "parser-1", label: "Segment fetched page text" },
+            { step: 3, agent: "json-structurer", label: "Emit AI-readable JSON" },
+            { step: 4, agent: "summarizer", label: "Info summary" }
           ]
         : [
-            { step: 1, agent: "manager", label: "Plan and validate" },
-            { step: 2, agent: "parser-1", label: "Parse source set A" },
-            { step: 3, agent: "parser-2", label: "Parse source set B" },
-            { step: 4, agent: "parser-3", label: "Parse source set C" },
-            { step: 5, agent: "analyzer-1", label: "Analyze technical evidence" },
-            { step: 6, agent: "analyzer-2", label: "Analyze policy implications" },
-            { step: 7, agent: "ref-tracker", label: "Build provenance graph" },
-            { step: 8, agent: "doc-writer", label: "Generate final rationale" }
+            { step: 1, agent: "manager", label: "Plan URL ingest" },
+            { step: 2, agent: "parser-1", label: "Segment page text" },
+            { step: 3, agent: "parser-2", label: "Normalize metadata & links" },
+            { step: 4, agent: "json-structurer", label: "Canonical structured JSON" },
+            { step: 5, agent: "analyzer-1", label: "Validate extraction" },
+            { step: 6, agent: "ref-tracker", label: "Source alignment check" },
+            { step: 7, agent: "summarizer", label: "Executive info summary" },
+            { step: 8, agent: "doc-writer", label: "Final narrative report" }
           ];
     const access: Record<string, ContextAccess> = {};
     for (const step of plan) {
@@ -440,7 +556,7 @@ export function Dashboard() {
             </div>
             <div>
               <div className="text-lg font-semibold tracking-tight">ContextOS</div>
-              <div className="text-xs text-zinc-400">Debuggable multi-agent runtime demo · <Kbd>⌘</Kbd> + <Kbd>K</Kbd></div>
+              <div className="text-xs text-zinc-400">URL → fetched text → multi-agent JSON → summary · <Kbd>⌘</Kbd> + <Kbd>K</Kbd></div>
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2">
@@ -485,7 +601,7 @@ export function Dashboard() {
                   value={state.inputText}
                   onChange={(e) => setState((s) => ({ ...s, inputText: e.target.value }))}
                   className={cx("min-h-24 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm", "placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30")}
-                  placeholder="Paste URLs/documents. Demo flow: input -> manager -> dynamic spawn -> conflicts -> breakpoint -> final report."
+                  placeholder="Paste one or more https:// URLs (and optional notes). Manager delegates fetch → structured JSON → summary."
                 />
               </CardBody>
             </Card>
@@ -515,7 +631,7 @@ export function Dashboard() {
             <Card className="h-full">
               <CardHeader><CardTitle><span>Agent Runtime</span><Badge tone="neutral">{Object.keys(state.agents).length} agents</Badge></CardTitle></CardHeader>
               <CardBody className="space-y-2">
-                {Object.keys(state.agents).map((agent) => (
+                {Object.entries(state.agents).map(([agent, status]) => (
                   <button
                     key={agent}
                     onClick={() => setState((s) => ({ ...s, selectedAgent: agent }))}
@@ -526,7 +642,7 @@ export function Dashboard() {
                         <div className="text-sm text-zinc-100">{displayAgentName(agent)}</div>
                         <div className="text-xs text-zinc-500">{agent}</div>
                       </div>
-                      <Badge tone={statusTone[state.agents[agent]]}>{state.agents[agent].toUpperCase()}</Badge>
+                      <Badge tone={statusTone[status]}>{status.toUpperCase()}</Badge>
                     </div>
                   </button>
                 ))}
@@ -655,7 +771,8 @@ export function Dashboard() {
                       spawn_plan: state.spawnPlan,
                       reasoning: state.managerReasoning,
                       required_breakpoints: state.breakpoints,
-                      context_access: state.contextAccess
+                      context_access: state.contextAccess,
+                      latest_structured_json: state.structuredJson
                     }) }} />
                   </div>
                 </CardBody>
