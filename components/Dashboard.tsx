@@ -1,8 +1,11 @@
 "use client";
 
 import * as React from "react";
-import { Badge, Button, Card, CardBody, CardHeader, CardTitle, Kbd } from "@/components/ui";
-import { BoltIcon, LockIcon, PlayIcon, ResetIcon, SparkIcon } from "@/components/icons";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { Badge, Button, Card, CardBody, CardHeader, CardTitle } from "@/components/ui";
+import { BoltIcon, ChevronDownIcon, LockIcon, PlayIcon, ResetIcon, SparkIcon } from "@/components/icons";
+import { CONTEXTOS_INPUT_KEY } from "@/lib/session-input";
 import { cx, formatTime } from "@/lib/utils";
 
 type AgentStatus = "idle" | "running" | "blocked" | "ok" | "warn" | "err";
@@ -113,20 +116,178 @@ function actorBadge(actor: TraceEvent["actor"]) {
   return <Badge tone="info">{displayAgentName(actor)}</Badge>;
 }
 
-function escapeHtml(v: string) {
-  return v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+type ModalSize = "md" | "lg" | "xl";
+
+function VaultAgentSelect({
+  value,
+  onChange,
+  agents
+}: {
+  value: string;
+  onChange: (id: string) => void;
+  agents: Record<string, AgentStatus>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const ids = Object.keys(agents);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
+
+  const triggerClasses = cx(
+    "flex w-full items-center justify-between gap-2 rounded-xl border border-indigo-500/25 bg-zinc-950/90 px-3 py-2.5 text-left text-sm",
+    "shadow-[inset_0_0_0_1px_rgba(99,102,241,0.1)]",
+    "transition hover:border-indigo-400/40 hover:bg-zinc-900/95",
+    "focus:outline-none focus:ring-2 focus:ring-indigo-500/45",
+    open && "border-indigo-400/45 ring-1 ring-indigo-500/25"
+  );
+
+  const listId = React.useId();
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        type="button"
+        className={triggerClasses}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-controls={listId}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="min-w-0 truncate">
+            <span className="font-medium text-zinc-100">{displayAgentName(value)}</span>
+            <span className="ml-1.5 font-mono text-[11px] text-zinc-500">({value})</span>
+          </span>
+          {agents[value] ? <Badge tone={statusTone[agents[value]!]}>{agents[value]}</Badge> : null}
+        </span>
+        <ChevronDownIcon className={cx("h-4 w-4 shrink-0 text-indigo-300/70 transition-transform", open && "rotate-180")} />
+      </button>
+      {open ? (
+        <ul
+          id={listId}
+          role="listbox"
+          aria-activedescendant={`vault-agent-opt-${value}`}
+          className={cx(
+            "absolute left-0 right-0 top-[calc(100%+6px)] z-[60] m-0 max-h-56 list-none overflow-x-hidden overflow-y-auto rounded-xl",
+            "border border-white/12 bg-zinc-900 p-0 shadow-2xl shadow-black/60 ring-1 ring-indigo-500/25"
+          )}
+        >
+          {ids.map((id) => {
+            const selected = id === value;
+            return (
+              <li key={id} className="m-0 w-full p-0" role="presentation">
+                <button
+                  id={`vault-agent-opt-${id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  className={cx(
+                    "flex min-h-[2.75rem] w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition",
+                    selected
+                      ? "bg-indigo-500/20 text-zinc-50"
+                      : "bg-zinc-900 text-zinc-300 hover:bg-zinc-800/95 hover:text-zinc-100"
+                  )}
+                  onClick={() => {
+                    onChange(id);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="min-w-0 truncate">
+                    <span className="font-medium">{displayAgentName(id)}</span>
+                    <span className="ml-1.5 font-mono text-[11px] text-zinc-500">({id})</span>
+                  </span>
+                  {agents[id] ? <Badge tone={statusTone[agents[id]!]}>{agents[id]}</Badge> : null}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
+  );
 }
 
-function prettyJsonHtml(value: unknown) {
-  const raw = escapeHtml(JSON.stringify(value, null, 2));
-  return raw
-    .replace(/(&quot;)?(".*?")(\s*:)?/g, (_m, _q, key, colon) => {
-      if (colon) return `<span class="text-sky-300">${key}</span><span class="text-zinc-500">:</span>`;
-      return `<span class="text-emerald-300">${key}</span>`;
-    })
-    .replace(/\b(true|false)\b/g, `<span class="text-fuchsia-300">$1</span>`)
-    .replace(/\b(null)\b/g, `<span class="text-zinc-500">$1</span>`)
-    .replace(/\b(\d+)\b/g, `<span class="text-amber-300">$1</span>`);
+function ModalFrame({
+  open,
+  onClose,
+  title,
+  subtitle,
+  children,
+  size = "md"
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  size?: ModalSize;
+}) {
+  const titleId = React.useId();
+
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  const width = size === "xl" ? "max-w-5xl" : size === "lg" ? "max-w-3xl" : "max-w-lg";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/80 p-3 backdrop-blur-md sm:items-center sm:p-6"
+      role="presentation"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={cx(
+          width,
+          "flex max-h-[92vh] w-full flex-col overflow-hidden rounded-2xl border border-white/12 bg-zinc-900/95 shadow-2xl shadow-black/50 ring-1 ring-indigo-500/15"
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex shrink-0 items-start justify-between gap-3 border-b border-white/10 bg-gradient-to-r from-indigo-500/10 to-transparent px-5 py-4">
+          <div className="min-w-0">
+            <h2 id={titleId} className="text-sm font-semibold tracking-wide text-zinc-50">
+              {title}
+            </h2>
+            {subtitle ? <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{subtitle}</p> : null}
+          </div>
+          <Button variant="ghost" size="sm" className="shrink-0 text-zinc-400 hover:text-zinc-100" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      </div>
+    </div>
+  );
 }
 
 function createInitialState() {
@@ -135,8 +296,7 @@ function createInitialState() {
     inputText: "",
     complexityLevel: "medium" as ComplexityLevel,
     managerReasoning: "Manager waiting for input.",
-    managerRawJson: null as ManagerResponse | null,
-    agents: { manager: "idle" as AgentStatus },
+    agents: { manager: "idle" as AgentStatus } as Record<string, AgentStatus>,
     spawnPlan: [{ step: 1, agent: "manager", label: "Analyze input and build plan" }] as SpawnStep[],
     breakpoints: [] as Breakpoint[],
     pendingBreakpoint: null as Breakpoint | null,
@@ -184,9 +344,29 @@ function createInitialState() {
 type State = ReturnType<typeof createInitialState>;
 
 export function Dashboard() {
+  const router = useRouter();
   const [state, setState] = React.useState<State>(() => createInitialState());
-  const [isSpawnPlanOpen, setIsSpawnPlanOpen] = React.useState(false);
-  const [isInspectorOpen, setIsInspectorOpen] = React.useState(true);
+  const [vaultModalOpen, setVaultModalOpen] = React.useState(false);
+  const [vaultModalAgent, setVaultModalAgent] = React.useState("manager");
+  const [memoryModalOpen, setMemoryModalOpen] = React.useState(false);
+  const [planModalOpen, setPlanModalOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(CONTEXTOS_INPUT_KEY);
+      if (raw != null && raw.length > 0) {
+        setState((s) => ({ ...s, inputText: raw }));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!Object.prototype.hasOwnProperty.call(state.agents, vaultModalAgent)) {
+      setVaultModalAgent(state.selectedAgent);
+    }
+  }, [state.agents, state.selectedAgent, vaultModalAgent]);
 
   const canApprove = state.isRunning && state.isBreakpointPending;
   const canContinue = state.isRunning && !state.isBreakpointPending;
@@ -227,20 +407,59 @@ export function Dashboard() {
     setState((s) => ({ ...s, vault: { ...s.vault, [key]: status } }));
   }
 
-  function ensureAgentsFromPlan(plan: SpawnStep[], contextAccess: Record<string, ContextAccess>) {
-    const nextAgents: Record<string, AgentStatus> = { manager: "running" };
-    const born: Record<string, number> = { ...state.bornAgents };
-    const access: Record<string, ContextAccess> = { ...state.contextAccess, ...contextAccess };
-    const loaded: Record<string, string[]> = { ...state.loadedContext };
-
+  function syncAgentsWithPlan(
+    s: State,
+    plan: SpawnStep[],
+    contextAccess: Record<string, ContextAccess>,
+    mode: "managerRun" | "preset"
+  ): Pick<State, "agents" | "bornAgents" | "contextAccess" | "loadedContext" | "selectedAgent"> {
+    const planAgents = new Set(plan.map((p) => p.agent));
+    const nextAgents: Record<string, AgentStatus> = {};
     for (const step of plan) {
-      if (!nextAgents[step.agent]) nextAgents[step.agent] = "idle";
-      if (!born[step.agent]) born[step.agent] = now();
-      if (!access[step.agent]) access[step.agent] = { allowed_context: [], denied_context: [] };
-      if (!loaded[step.agent]) loaded[step.agent] = [];
+      if (nextAgents[step.agent] !== undefined) continue;
+      nextAgents[step.agent] =
+        step.agent === "manager" ? (mode === "managerRun" ? "running" : "idle") : "idle";
     }
 
-    setState((s) => ({ ...s, agents: { ...s.agents, ...nextAgents }, bornAgents: born, contextAccess: access, loadedContext: loaded }));
+    const nextBorn: Record<string, number> = {};
+    for (const a of planAgents) {
+      nextBorn[a] = s.bornAgents[a] ?? now();
+    }
+
+    const nextAccess: Record<string, ContextAccess> = {};
+    const nextLoaded: Record<string, string[]> = {};
+    for (const a of planAgents) {
+      nextAccess[a] =
+        contextAccess[a] ??
+        s.contextAccess[a] ?? {
+          allowed_context: [],
+          denied_context: []
+        };
+      nextLoaded[a] = s.loadedContext[a] ?? [];
+    }
+    for (const step of plan) {
+      if (contextAccess[step.agent]) {
+        nextAccess[step.agent] = contextAccess[step.agent];
+      }
+    }
+
+    const selectedAgent = planAgents.has(s.selectedAgent) ? s.selectedAgent : plan[0]?.agent ?? "manager";
+
+    return {
+      agents: nextAgents,
+      bornAgents: nextBorn,
+      contextAccess: nextAccess,
+      loadedContext: nextLoaded,
+      selectedAgent
+    };
+  }
+
+  function ensureAgentsFromPlan(
+    plan: SpawnStep[],
+    contextAccess: Record<string, ContextAccess>,
+    mode: "managerRun" | "preset"
+  ) {
+    setState((s) => ({ ...s, ...syncAgentsWithPlan(s, plan, contextAccess, mode) }));
   }
 
   function applyContextEvents(context: Record<string, ContextAccess>) {
@@ -279,13 +498,12 @@ export function Dashboard() {
       if (!res.ok || !payload.ok || !payload.data) throw new Error(payload.error ?? "Invalid manager response.");
 
       const manager = payload.data;
-      ensureAgentsFromPlan(manager.spawn_plan, manager.context_access);
+      ensureAgentsFromPlan(manager.spawn_plan, manager.context_access, "managerRun");
       applyContextEvents(manager.context_access);
       const bp = manager.required_breakpoints[0] ?? null;
 
       setState((s) => ({
         ...s,
-        managerRawJson: manager,
         complexityLevel: manager.complexity_level,
         managerReasoning: manager.reasoning,
         spawnPlan: manager.spawn_plan,
@@ -521,8 +739,15 @@ export function Dashboard() {
 
   function resetDemo() {
     setState(createInitialState());
-    setIsInspectorOpen(true);
-    setIsSpawnPlanOpen(false);
+    setVaultModalOpen(false);
+    setMemoryModalOpen(false);
+    setPlanModalOpen(false);
+    setVaultModalAgent("manager");
+    try {
+      sessionStorage.removeItem(CONTEXTOS_INPUT_KEY);
+    } catch {
+      /* ignore */
+    }
   }
 
   function applySpawnPlanPreset(preset: "fast" | "deep") {
@@ -548,250 +773,343 @@ export function Dashboard() {
     for (const step of plan) {
       access[step.agent] = access[step.agent] ?? { allowed_context: ["parsed_json"], denied_context: ["external_network"] };
     }
-    ensureAgentsFromPlan(plan, access);
-    setState((s) => ({ ...s, spawnPlan: plan }));
+    setState((s) => ({
+      ...s,
+      spawnPlan: plan,
+      ...syncAgentsWithPlan(s, plan, access, "preset")
+    }));
     pushMemory({ kind: "decision", title: `Spawn plan preset ${preset}`, detail: `Preset applied with ${plan.length} steps.` });
   }
 
-  const inputMeta = state.inputText.trim() ? `${state.inputText.trim().split(/\s+/).length} tokens` : "empty";
-  const selectedAccess = state.contextAccess[state.selectedAgent] ?? { allowed_context: [], denied_context: [] };
-  const selectedLoaded = state.loadedContext[state.selectedAgent] ?? [];
+  const inputMeta = state.inputText.trim() ? `${state.inputText.trim().split(/\s+/).length} words` : "empty";
+  const modalAccess = state.contextAccess[vaultModalAgent] ?? { allowed_context: [], denied_context: [] };
+  const modalLoaded = state.loadedContext[vaultModalAgent] ?? [];
+
+  const openVaultModal = (agentId?: string) => {
+    const id = agentId ?? state.selectedAgent;
+    setVaultModalAgent(id);
+    setState((s) => ({ ...s, selectedAgent: id }));
+    setVaultModalOpen(true);
+  };
 
   return (
-    <div className="min-h-dvh">
-      <header className="mx-auto max-w-[1650px] px-5 pt-6 pb-4">
-        <div className="flex items-center justify-between gap-6">
-          <div className="flex items-center gap-3">
-            <div className="grid h-11 w-11 place-items-center rounded-2xl border border-indigo-400/20 bg-indigo-500/15 shadow-[0_0_0_1px_rgba(99,102,241,0.18)]">
+    <div className="flex min-h-dvh flex-col bg-zinc-950 text-zinc-100">
+      <header className="shrink-0 border-b border-white/10 px-4 py-4">
+        <div className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-xl border border-indigo-400/20 bg-indigo-500/15">
               <SparkIcon className="h-5 w-5 text-indigo-200" />
             </div>
-            <div>
-              <div className="text-lg font-semibold tracking-tight">ContextOS</div>
-              <div className="text-xs text-zinc-400">URL → fetched text → multi-agent JSON → summary · <Kbd>⌘</Kbd> + <Kbd>K</Kbd></div>
+            <div className="min-w-0">
+              <div className="text-base font-semibold tracking-tight">ContextOS</div>
+              <div className="text-[11px] text-zinc-500">URLs → fetch → agents → JSON & summary</div>
             </div>
+            <Link
+              href="/"
+              className="rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs font-medium text-indigo-200/90 hover:border-indigo-400/25 hover:bg-indigo-500/10"
+            >
+              ← Landing
+            </Link>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button variant="primary" onClick={() => void runManager()} disabled={state.isManagerLoading || state.isRunning}>
-              <PlayIcon className="h-4 w-4" />
-              {state.isManagerLoading ? "Running..." : "Run Manager"}
-            </Button>
-            <Button variant="secondary" onClick={() => void approveBreakpoint()} disabled={!canApprove}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => openVaultModal()} title="View vault & per-agent access">
               <LockIcon className="h-4 w-4" />
-              Approve Breakpoint
+              Vault
             </Button>
-            <Button variant="ghost" onClick={() => setIsSpawnPlanOpen((v) => !v)}>
+            <Button variant="primary" size="sm" onClick={() => void runManager()} disabled={state.isManagerLoading || state.isRunning}>
+              <PlayIcon className="h-4 w-4" />
+              {state.isManagerLoading ? "Running…" : "Run"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void approveBreakpoint()} disabled={!canApprove}>
+              Approve
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => void continueExecution()} disabled={!canContinue}>
+              Continue
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setPlanModalOpen(true)}>
               <BoltIcon className="h-4 w-4" />
-              Edit Spawn Plan
+              Plan
             </Button>
-            <Button variant="secondary" onClick={() => void continueExecution()} disabled={!canContinue}>
-              Continue Execution
-            </Button>
-            <Button variant="danger" onClick={resetDemo}>
+            <Button variant="danger" size="sm" onClick={resetDemo}>
               <ResetIcon className="h-4 w-4" />
-              Reset Demo
+              Reset
             </Button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1650px] px-5 pb-10">
-        <div className="grid grid-cols-12 gap-4">
-          <div className="col-span-12">
-            <Card>
-              <CardHeader>
-                <CardTitle>
-                  <div className="flex items-center gap-2">
-                    <span>Input Buffer</span>
-                    <Badge tone={state.inputText ? "ok" : "neutral"}>{inputMeta}</Badge>
+      <main className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-1 flex-col gap-4 px-4 py-4 min-h-0">
+        <div className="flex shrink-0 flex-col gap-2 rounded-2xl border border-white/10 bg-white/[0.02] px-3 py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2">
+              <span className="pl-2 text-sm font-semibold tracking-tight text-zinc-100">Input</span>
+              <Badge tone="info" size="md">
+                {state.complexityLevel}
+              </Badge>
+              <Badge tone={state.inputText ? "ok" : "neutral"} size="md">
+                {inputMeta}
+              </Badge>
+            </div>
+            <Button variant="secondary" size="sm" type="button" className="shrink-0" onClick={() => router.push("/")}>
+              Edit on landing
+            </Button>
+          </div>
+          <textarea
+            value={state.inputText}
+            onChange={(e) => {
+              const v = e.target.value;
+              setState((s) => ({ ...s, inputText: v }));
+              try {
+                sessionStorage.setItem(CONTEXTOS_INPUT_KEY, v);
+              } catch {
+                /* ignore */
+              }
+            }}
+            rows={4}
+            className={cx(
+              "min-h-[88px] max-h-40 w-full resize-y rounded-xl border border-white/15 bg-black/35 px-3 py-2.5 text-sm leading-relaxed text-zinc-100",
+              "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] placeholder:text-zinc-500",
+              "focus:border-indigo-400/35 focus:outline-none focus:ring-2 focus:ring-indigo-500/35"
+            )}
+            placeholder="https://…"
+          />
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col gap-4 lg:flex-row lg:items-stretch">
+          {/* Timeline */}
+          <Card className="flex max-h-[min(42vh,420px)] shrink-0 flex-col lg:h-auto lg:max-h-[min(70vh,720px)] lg:w-72 lg:max-w-[min(100%,20rem)] xl:w-80">
+            <CardHeader className="shrink-0 pb-2">
+              <CardTitle className="text-xs uppercase tracking-wide text-zinc-400">Timeline</CardTitle>
+            </CardHeader>
+            <CardBody className="min-h-0 flex-1 space-y-2 overflow-y-auto pt-0">
+              <div className="text-[11px] text-zinc-500">
+                {timeline.filter((t) => t.done).length}/{timeline.length} milestones
+              </div>
+              <div className="grid gap-1.5">
+                {timeline.map((item) => (
+                  <div
+                    key={item.label}
+                    className={cx(
+                      "rounded-lg border px-2.5 py-1.5 text-[11px] leading-snug",
+                      item.done ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90" : "border-white/10 bg-black/25 text-zinc-500"
+                    )}
+                  >
+                    {item.label}
                   </div>
-                  <Badge tone="info">complexity: {state.complexityLevel.toUpperCase()}</Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardBody>
-                <textarea
-                  value={state.inputText}
-                  onChange={(e) => setState((s) => ({ ...s, inputText: e.target.value }))}
-                  className={cx("min-h-24 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm", "placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30")}
-                  placeholder="Paste one or more https:// URLs (and optional notes). Manager delegates fetch → structured JSON → summary."
-                />
-              </CardBody>
-            </Card>
-          </div>
+                ))}
+              </div>
+            </CardBody>
+          </Card>
 
-          <div className="col-span-12">
-            <Card>
-              <CardHeader>
-                <CardTitle>
-                  <span>Runtime Replay Timeline</span>
-                  <Badge tone="neutral">{timeline.filter((t) => t.done).length}/{timeline.length}</Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardBody>
-                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                  {timeline.map((item) => (
-                    <div key={item.label} className={cx("rounded-xl border px-3 py-2 text-xs transition", item.done ? "border-emerald-400/30 bg-emerald-500/10 text-emerald-200" : "border-white/10 bg-white/[0.02] text-zinc-400")}>
-                      {item.label}
-                    </div>
-                  ))}
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2 lg:items-stretch">
+          {/* Activity */}
+          <Card className="flex min-h-[320px] flex-col lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]">
+            <CardHeader className="shrink-0 pb-2">
+              <CardTitle className="flex-wrap">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span>Activity</span>
+                  <Badge tone={state.isBreakpointPending ? "warn" : "info"}>{state.isBreakpointPending ? "breakpoint" : "running"}</Badge>
                 </div>
-              </CardBody>
-            </Card>
-          </div>
-
-          <div className="col-span-12 lg:col-span-3">
-            <Card className="h-full">
-              <CardHeader><CardTitle><span>Agent Runtime</span><Badge tone="neutral">{Object.keys(state.agents).length} agents</Badge></CardTitle></CardHeader>
-              <CardBody className="space-y-2">
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="secondary" size="sm" onClick={() => setMemoryModalOpen(true)}>
+                    Memory
+                  </Button>
+                </div>
+              </CardTitle>
+            </CardHeader>
+            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 pt-0">
+              <div className="flex shrink-0 gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:thin]">
                 {Object.entries(state.agents).map(([agent, status]) => (
                   <button
                     key={agent}
+                    type="button"
                     onClick={() => setState((s) => ({ ...s, selectedAgent: agent }))}
-                    className={cx("w-full rounded-xl border px-3 py-2 text-left transition", "agent-enter", state.selectedAgent === agent ? "border-indigo-400/40 bg-indigo-500/10" : "border-white/10 bg-white/[0.02] hover:border-white/20")}
+                    onDoubleClick={() => openVaultModal(agent)}
+                    title="Double-click for vault"
+                    className={cx(
+                      "flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-left text-xs transition",
+                      state.selectedAgent === agent ? "border-indigo-400/50 bg-indigo-500/15" : "border-white/10 bg-white/[0.03] hover:border-white/20"
+                    )}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <div className="text-sm text-zinc-100">{displayAgentName(agent)}</div>
-                        <div className="text-xs text-zinc-500">{agent}</div>
-                      </div>
-                      <Badge tone={statusTone[status]}>{status.toUpperCase()}</Badge>
-                    </div>
+                    <span className="font-medium text-zinc-100">{displayAgentName(agent)}</span>
+                    <Badge tone={statusTone[status]}>{status}</Badge>
                   </button>
                 ))}
-              </CardBody>
-            </Card>
-          </div>
+              </div>
 
-          <div className="col-span-12 lg:col-span-6">
-            <Card className="h-full">
-              <CardHeader><CardTitle><span>Live Execution Trace</span><Badge tone={state.isBreakpointPending ? "warn" : "info"}>{state.isBreakpointPending ? "BREAKPOINT" : "FLOWING"}</Badge></CardTitle></CardHeader>
-              <CardBody>
-                <div className="max-h-[520px] space-y-2 overflow-auto">
-                  {state.trace.map((e) => (
-                    <div key={e.id} className={cx("rounded-xl border px-3 py-2", e.kind === "context-grant" && "border-emerald-400/30 bg-emerald-500/10", e.kind === "context-deny" && "border-rose-400/30 bg-rose-500/10", e.kind === "breakpoint" && "border-amber-400/30 bg-amber-500/10", e.kind === "conflict" && "border-fuchsia-400/30 bg-fuchsia-500/10", e.kind === "action" && "border-white/10 bg-black/20")}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          {actorBadge(e.actor)}
-                          <Badge tone={toneForTrace(e.kind)}>{e.kind.toUpperCase()}</Badge>
-                        </div>
-                        <div className="text-[11px] text-zinc-500">{formatTime(e.ts)}</div>
+              <div className="min-h-[180px] flex-1 space-y-2 overflow-y-auto rounded-xl border border-white/10 bg-black/20 p-2">
+                {state.trace.map((e) => (
+                  <div
+                    key={e.id}
+                    className={cx(
+                      "rounded-lg border px-2.5 py-2 text-xs",
+                      e.kind === "context-grant" && "border-emerald-400/25 bg-emerald-500/10",
+                      e.kind === "context-deny" && "border-rose-400/25 bg-rose-500/10",
+                      e.kind === "breakpoint" && "border-amber-400/25 bg-amber-500/10",
+                      e.kind === "conflict" && "border-fuchsia-400/25 bg-fuchsia-500/10",
+                      e.kind === "action" && "border-white/10 bg-black/30"
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {actorBadge(e.actor)}
+                        <Badge tone={toneForTrace(e.kind)}>{e.kind}</Badge>
                       </div>
-                      <div className="mt-1 text-sm text-zinc-100">{e.title}</div>
-                      {e.detail ? <div className="mt-1 text-xs text-zinc-300">{e.detail}</div> : null}
+                      <span className="shrink-0 text-[10px] text-zinc-500">{formatTime(e.ts)}</span>
                     </div>
-                  ))}
-                </div>
-              </CardBody>
-            </Card>
-          </div>
-
-          <div className="col-span-12 lg:col-span-3">
-            <Card className="h-full">
-              <CardHeader><CardTitle><span>Long-Term Memory</span><Badge tone="neutral">{state.memory.length} items</Badge></CardTitle></CardHeader>
-              <CardBody className="space-y-2">
-                <div className="max-h-[340px] space-y-2 overflow-auto">
-                  {state.memory.map((m) => (
-                    <div key={m.id} className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2">
-                      <div className="flex items-center justify-between"><Badge tone={toneForMemory(m.kind)}>{m.kind.toUpperCase()}</Badge><span className="text-[11px] text-zinc-500">{formatTime(m.ts)}</span></div>
-                      <div className="mt-1 text-sm text-zinc-100">{m.title}</div>
-                      <div className="text-xs text-zinc-400">{m.detail}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-3 text-xs">
-                  <div className="font-medium text-amber-200">Breakpoint Console</div>
-                  <div className="mt-1 text-amber-100">{state.pendingBreakpoint ? `${state.pendingBreakpoint.title}: ${state.pendingBreakpoint.reason}` : "No pending breakpoint."}</div>
-                  <div className="mt-2 text-zinc-300">Conflicts: {state.conflicts.join(" | ") || "none"}</div>
-                </div>
-              </CardBody>
-            </Card>
-          </div>
-
-          <div className="col-span-12 lg:col-span-4">
-            <Card className="h-full">
-              <CardHeader><CardTitle><span>Context Vault</span><Badge tone="info">{state.selectedAgent}</Badge></CardTitle></CardHeader>
-              <CardBody className="space-y-3">
-                <div className="grid grid-cols-1 gap-2">
-                  {VAULT_KEYS.map((k) => (
-                    <div key={k} className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs">
-                      <span className="text-zinc-300">{k}</span>
-                      <Badge tone={toneForVault(state.vault[k])}>{state.vault[k].toUpperCase()}</Badge>
-                    </div>
-                  ))}
-                </div>
-                <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs">
-                  <div className="font-medium text-zinc-200">{displayAgentName(state.selectedAgent)} context</div>
-                  <div className="mt-2 text-emerald-300">allowed: {selectedAccess.allowed_context.join(", ") || "none"}</div>
-                  <div className="mt-1 text-rose-300">denied: {selectedAccess.denied_context.join(", ") || "none"}</div>
-                  <div className="mt-1 text-sky-300">loaded: {selectedLoaded.join(", ") || "none"}</div>
-                </div>
-              </CardBody>
-            </Card>
-          </div>
-
-          <div className="col-span-12 lg:col-span-8">
-            <Card className="h-full">
-              <CardHeader>
-                <CardTitle>
-                  <span>Final Output</span>
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => applySpawnPlanPreset("fast")}>Fast preset</Button>
-                    <Button size="sm" variant="secondary" onClick={() => applySpawnPlanPreset("deep")}>Deep preset</Button>
-                    <Button size="sm" variant="ghost" onClick={() => setIsSpawnPlanOpen((v) => !v)}>{isSpawnPlanOpen ? "Hide" : "Show"} spawn plan</Button>
+                    <div className="mt-1 font-medium text-zinc-100">{e.title}</div>
+                    {e.detail ? <div className="mt-0.5 text-zinc-400">{e.detail}</div> : null}
                   </div>
-                </CardTitle>
-              </CardHeader>
-              <CardBody>
-                <div className="text-base font-semibold text-zinc-100">{state.output.title}</div>
-                <div className="mt-1 text-sm text-zinc-300">{state.output.summary}</div>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  {state.output.sections.map((s) => (
-                    <div key={s.h} className="rounded-xl border border-white/10 bg-black/20 p-3">
-                      <div className="text-xs font-semibold text-zinc-200">{s.h}</div>
-                      <div className="text-xs text-zinc-400">{s.p}</div>
-                    </div>
-                  ))}
-                </div>
-                {isSpawnPlanOpen ? (
-                  <div className="mt-3 space-y-2">
-                    {state.spawnPlan.map((step) => (
-                      <div key={`${step.step}-${step.agent}`} className="rounded-xl border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-zinc-300">
-                        #{step.step} {displayAgentName(step.agent)} - {step.label}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </CardBody>
-            </Card>
-          </div>
+                ))}
+              </div>
 
-          <div className="col-span-12">
-            <Card>
-              <CardHeader>
-                <CardTitle>
-                  <span>Runtime JSON Inspector</span>
-                  <Button size="sm" variant="ghost" onClick={() => setIsInspectorOpen((v) => !v)}>
-                    {isInspectorOpen ? "Collapse" : "Expand"}
+            </CardBody>
+          </Card>
+
+          {/* Results */}
+          <Card className="flex min-h-[320px] flex-col lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]">
+            <CardHeader className="shrink-0 pb-2">
+              <CardTitle className="flex-wrap">
+                <span>Results</span>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={() => applySpawnPlanPreset("fast")}>
+                    Fast preset
                   </Button>
-                </CardTitle>
-              </CardHeader>
-              {isInspectorOpen ? (
-                <CardBody>
-                  <div className="rounded-xl border border-white/10 bg-black/40 p-3">
-                    <pre className="overflow-auto text-xs leading-relaxed" dangerouslySetInnerHTML={{ __html: prettyJsonHtml(state.managerRawJson ?? {
-                      complexity_level: state.complexityLevel,
-                      spawn_plan: state.spawnPlan,
-                      reasoning: state.managerReasoning,
-                      required_breakpoints: state.breakpoints,
-                      context_access: state.contextAccess,
-                      latest_structured_json: state.structuredJson
-                    }) }} />
-                  </div>
-                </CardBody>
-              ) : null}
-            </Card>
+                  <Button size="sm" variant="secondary" onClick={() => applySpawnPlanPreset("deep")}>
+                    Deep preset
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setPlanModalOpen(true)}>
+                    Spawn plan ({state.spawnPlan.length})
+                  </Button>
+                </div>
+              </CardTitle>
+            </CardHeader>
+            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden pt-0">
+              <div className="shrink-0">
+                <div className="text-sm font-semibold text-zinc-100">{state.output.title}</div>
+                <p className="mt-1 text-sm text-zinc-400">{state.output.summary}</p>
+              </div>
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {state.output.sections.map((s) => (
+                    <div key={s.h} className="rounded-xl border border-white/10 bg-black/25 p-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{s.h}</div>
+                      <div className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{s.p}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </CardBody>
+          </Card>
           </div>
         </div>
       </main>
+
+      <ModalFrame
+        open={vaultModalOpen}
+        onClose={() => setVaultModalOpen(false)}
+        title="Context vault"
+        subtitle="Per-agent access and vault slot states."
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-zinc-500">Agent</label>
+            <VaultAgentSelect
+              value={vaultModalAgent}
+              agents={state.agents}
+              onChange={(id) => {
+                setVaultModalAgent(id);
+                setState((s) => ({ ...s, selectedAgent: id }));
+              }}
+            />
+          </div>
+          <div>
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Vault slots</div>
+            <div className="grid gap-1.5 sm:grid-cols-2">
+              {VAULT_KEYS.map((k) => (
+                <div key={k} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs">
+                  <span className="text-zinc-400">{k}</span>
+                  <Badge tone={toneForVault(state.vault[k])}>{state.vault[k]}</Badge>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-xs">
+            <div className="font-medium text-zinc-200">{displayAgentName(vaultModalAgent)}</div>
+            <div className="mt-2 text-emerald-300/90">
+              <span className="text-zinc-500">Allowed — </span>
+              {modalAccess.allowed_context.join(", ") || "none"}
+            </div>
+            <div className="mt-1 text-rose-300/90">
+              <span className="text-zinc-500">Denied — </span>
+              {modalAccess.denied_context.join(", ") || "none"}
+            </div>
+            <div className="mt-1 text-sky-300/90">
+              <span className="text-zinc-500">Loaded — </span>
+              {modalLoaded.join(", ") || "none"}
+            </div>
+          </div>
+          <p className="text-[11px] text-zinc-500">Tip: double-click an agent chip in Activity to open the vault for that agent.</p>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame
+        open={memoryModalOpen}
+        onClose={() => setMemoryModalOpen(false)}
+        title="Memory & breakpoints"
+        subtitle={`${state.memory.length} entries · conflicts and breakpoint state`}
+        size="xl"
+      >
+        <div className="space-y-4">
+          <div className="space-y-2">
+            {state.memory.length === 0 ? (
+              <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-6 text-center text-[11px] text-zinc-500">
+                No memory entries yet.
+              </div>
+            ) : (
+              state.memory.map((m) => (
+                <div key={m.id} className="rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-[11px]">
+                  <div className="flex items-center justify-between gap-2">
+                    <Badge tone={toneForMemory(m.kind)}>{m.kind}</Badge>
+                    <span className="text-[10px] text-zinc-500">{formatTime(m.ts)}</span>
+                  </div>
+                  <div className="mt-1 font-medium text-zinc-200">{m.title}</div>
+                  <div className="text-zinc-500">{m.detail}</div>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-[11px]">
+            <span className="font-medium text-amber-200/90">Breakpoint</span>
+            <div className="mt-1 text-amber-100/90">{state.pendingBreakpoint ? `${state.pendingBreakpoint.title}` : "None"}</div>
+            <div className="mt-2 border-t border-amber-400/15 pt-2 text-zinc-400">
+              Conflicts: {state.conflicts.join(" · ") || "none"}
+            </div>
+          </div>
+        </div>
+      </ModalFrame>
+
+      <ModalFrame
+        open={planModalOpen}
+        onClose={() => setPlanModalOpen(false)}
+        title="Spawn plan"
+        subtitle={`${state.spawnPlan.length} steps · edit with Fast / Deep presets in Results`}
+        size="lg"
+      >
+        <div className="space-y-2">
+          {state.spawnPlan.map((step) => (
+            <div
+              key={`${step.step}-${step.agent}`}
+              className="rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-[11px] text-zinc-300"
+            >
+              <span className="font-mono text-zinc-500">#{step.step}</span>{" "}
+              <span className="font-medium text-zinc-100">{displayAgentName(step.agent)}</span>
+              <span className="text-zinc-500"> — {step.label}</span>
+            </div>
+          ))}
+        </div>
+      </ModalFrame>
     </div>
   );
 }
