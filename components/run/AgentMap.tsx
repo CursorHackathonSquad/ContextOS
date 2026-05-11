@@ -3,16 +3,17 @@
 import * as React from "react";
 import { Badge, PanelRow, type BadgeTone } from "@/components/ui";
 import type { OrchestratorPlan, OrchestratorSubtask } from "@/lib/orchestrator/types";
+import { SECTION_PAD, SURFACE_ACTIVITY_AGENT, SURFACE_ACTIVITY_NEUTRAL } from "@/lib/ui-surfaces";
 import { cx } from "@/lib/utils";
 
 type AgentStatus = "idle" | "running" | "blocked" | "ok" | "warn" | "err";
 
 const statusTone: Record<AgentStatus, BadgeTone> = {
-  idle: "neutral",
-  running: "info",
-  blocked: "warn",
+  idle: "info",
+  running: "warn",
+  blocked: "neutral",
   ok: "ok",
-  warn: "warn",
+  warn: "review",
   err: "err"
 };
 
@@ -92,13 +93,15 @@ function AgentTile({
   status?: AgentStatus;
 }) {
   const displayRole = subtask.role.trim() || humanizeId(subtask.id);
-  const instr =
-    subtask.instruction.length > 160 ? `${subtask.instruction.slice(0, 160)}…` : subtask.instruction;
 
   return (
     <div
-      className="min-w-[210px] max-w-[min(100%,320px)] flex-1 rounded-xl border border-white/12 bg-black/35 p-3 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.03)]"
-      title={`${displayRole}\n${subtask.id}`}
+      className={cx(
+        "min-w-[210px] max-w-[min(100%,320px)] flex-1",
+        SECTION_PAD,
+        SURFACE_ACTIVITY_NEUTRAL
+      )}
+      title={`${displayRole} · ${subtask.id}`}
     >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
@@ -110,7 +113,9 @@ function AgentTile({
           </Badge>
         ) : null}
       </div>
-      <p className="mt-2 text-[11px] leading-relaxed text-zinc-400">{instr}</p>
+      <div className="hide-scrollbar mt-2 max-h-48 min-h-0 overflow-y-auto rounded-md border border-white/[0.05] bg-black/20 px-0 pb-2 pt-1 text-[11px] leading-relaxed text-zinc-400">
+        <p className="whitespace-pre-wrap">{subtask.instruction}</p>
+      </div>
       <div className="mt-2 flex flex-wrap gap-1">
         {subtask.allowed_context_keys.slice(0, 6).map((k) => (
           <Badge key={k} tone="neutral" size="compact" className="font-mono font-normal">
@@ -140,7 +145,7 @@ export function AgentMap({
   const handoffs = collectArtifactHandoffs(plan);
 
   return (
-    <div className="rounded-xl border border-white/10 bg-black/25 p-4">
+    <div className={cx(SECTION_PAD, SURFACE_ACTIVITY_NEUTRAL)}>
       <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Agent map</div>
       <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
         Only the <span className="text-zinc-400">Orchestrator (Admin)</span> creates workers — it assigns each{" "}
@@ -149,7 +154,7 @@ export function AgentMap({
         output.
       </p>
 
-      <div className="mt-4 rounded-xl border border-indigo-400/30 bg-gradient-to-br from-indigo-500/15 via-indigo-500/5 to-transparent px-4 py-3">
+      <div className={cx("mt-4", SECTION_PAD, SURFACE_ACTIVITY_AGENT)}>
         <div className="font-semibold text-indigo-100">Orchestrator (Admin)</div>
         <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">
           Assigns {all.length} worker role{all.length === 1 ? "" : "s"}, orders batches, and sets context keys so agents are not overloaded.
@@ -174,7 +179,7 @@ export function AgentMap({
       </div>
 
       <div className="relative py-2">
-        <div className="pointer-events-none absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-gradient-to-b from-indigo-400/25 via-white/10 to-transparent" aria-hidden />
+        <div className="pointer-events-none absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-gradient-to-b from-indigo-950/50 via-zinc-800/40 to-transparent" aria-hidden />
       </div>
 
       <div className="space-y-6">
@@ -200,7 +205,7 @@ export function AgentMap({
         ))}
       </div>
 
-      <div className="mt-6 border-t border-white/10 pt-4">
+      <div className="mt-6 border-t border-zinc-800/80 pt-4">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Who feeds whom</div>
         <p className="mt-1 text-[11px] text-zinc-500">
           When a worker&apos;s bundle includes <span className="font-mono text-zinc-400">artifact:&lt;id&gt;</span>, it reads the other

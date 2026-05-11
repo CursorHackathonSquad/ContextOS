@@ -11,7 +11,6 @@ import {
   CardHeader,
   CardTitle,
   Chip,
-  ChipMeta,
   EmptyWell,
   InsetPanel,
   Select,
@@ -19,10 +18,17 @@ import {
 } from "@/components/ui";
 import { LockIcon, PlayIcon, ResetIcon, SparkIcon, XIcon } from "@/components/ui/icons";
 import { AgentMap } from "./AgentMap";
-import { CONTEXTOS_INPUT_KEY } from "@/lib/session-input";
+import { CONTEXTOS_INPUT_KEY, TASK_INPUT_PLACEHOLDER } from "@/lib/session-input";
 import { parseOrchestratorPlanJson } from "@/lib/orchestrator/plan-json";
 import { consumeSseJson } from "@/lib/net/sse-client";
 import type { OrchestratorPlan, WorkerArtifact } from "@/lib/orchestrator/types";
+import {
+  SECTION_PAD,
+  SURFACE_ACTIVITY_AGENT,
+  SURFACE_ACTIVITY_NEUTRAL,
+  SURFACE_CARD_INNER,
+  SURFACE_RESULTS_BLOCK
+} from "@/lib/ui-surfaces";
 import { cx, formatTime } from "@/lib/utils";
 
 type AgentStatus = "idle" | "running" | "blocked" | "ok" | "warn" | "err";
@@ -37,25 +43,23 @@ type SpawnStep = {
   phaseIndex: number;
   agent: string;
   roleTitle: string;
-  label: string;
+  /** Full orchestrator instruction for this worker (never truncated). */
+  instruction: string;
   allowedContextKeys: string[];
 };
 
 type ApprovalItem = { id: string; role: string; reason: string };
-
-/** Shared chrome — Card root already uses rounded-2xl border/bg; headers/bodies use ui defaults px-4. */
-const traceIntroClass = "text-[11px] leading-snug text-zinc-500";
 
 /** Seed trace row — must not use Date.now() / random so SSR and client HTML match (hydration). */
 const INITIAL_TRACE_ID = "trace_seed_ready";
 const INITIAL_TRACE_TS = 1704067200000;
 
 const statusTone: Record<AgentStatus, BadgeTone> = {
-  idle: "neutral",
-  running: "info",
-  blocked: "warn",
+  idle: "info",
+  running: "warn",
+  blocked: "neutral",
   ok: "ok",
-  warn: "warn",
+  warn: "review",
   err: "err"
 };
 
@@ -64,7 +68,8 @@ const statusLabel: Record<AgentStatus, string> = {
   running: "Running",
   blocked: "Waiting",
   ok: "Done",
-  warn: "Check",
+  /** Model asked for human review of this step — not the same as pausing the whole pipeline. */
+  warn: "Review",
   err: "Error"
 };
 
@@ -223,13 +228,18 @@ function traceKindTone(kind: TraceKind): BadgeTone {
   return "neutral";
 }
 
-/** Left accent on trace rows — colored only for semantic kinds; plain actions use transparent so there’s no grey bar. */
-function traceKindAccent(kind: TraceKind): string {
-  if (kind === "context-grant") return "border-l-emerald-400/55";
-  if (kind === "context-deny") return "border-l-rose-400/55";
-  if (kind === "breakpoint") return "border-l-amber-400/55";
-  if (kind === "conflict") return "border-l-fuchsia-400/55";
-  return "border-l-transparent";
+function isAgentTraceActor(actor: TraceEvent["actor"]): boolean {
+  return actor !== "system" && actor !== "human";
+}
+
+/** Card surface per activity row — neutral vs indigo-tinted agent lines. */
+function traceRowClasses(actor: TraceEvent["actor"]): string {
+  const agent = isAgentTraceActor(actor);
+  return cx(
+    SECTION_PAD,
+    "text-xs leading-snug",
+    agent ? SURFACE_ACTIVITY_AGENT : SURFACE_ACTIVITY_NEUTRAL
+  );
 }
 
 function actorBadge(actor: TraceEvent["actor"], steps: SpawnStep[]) {
@@ -276,12 +286,14 @@ function createInitialState() {
     ] as TraceEvent[],
     output: {
       title: "",
-      summary: "When a run finishes, the merged answer appears in the sections below.",
+      summary: "",
       sections: [{ h: "Status", p: "Nothing run yet." }]
     },
     artifacts: {} as Record<string, WorkerArtifact>,
     orchestratorPlan: null as OrchestratorPlan | null,
-    loadedContext: {} as Record<string, string[]>
+    loadedContext: {} as Record<string, string[]>,
+    /** When false, POST /api/orchestrate skips refine LLM (faster demos). */
+    refineBeforeRun: true
   };
 }
 
@@ -290,6 +302,13 @@ type State = ReturnType<typeof createInitialState>;
 export function Dashboard() {
   const [state, setState] = React.useState<State>(() => createInitialState());
   const [approvalNotice, setApprovalNotice] = React.useState<ApprovalItem[] | null>(null);
+  /** Server handed off after each batch; approve to run the next batch or merge. */
+  const [pauseGate, setPauseGate] = React.useState<{
+    runId: string;
+    completedPhaseIndex: number;
+    totalPhases: number;
+    nextStep: "phase" | "merge";
+  } | null>(null);
   const [revisionFeedback, setRevisionFeedback] = React.useState<Record<string, string>>({});
   const [revisePendingId, setRevisePendingId] = React.useState<string | null>(null);
   const [vaultModalOpen, setVaultModalOpen] = React.useState(false);
@@ -302,33 +321,37 @@ export function Dashboard() {
   /** If true, new Results content scrolls the panel to the bottom; scrolling up disables until user returns near the bottom. */
   const resultsStickBottomRef = React.useRef(true);
 
+  /**
+   * One-shot handoff from landing → /run only. Session keys are removed immediately so refresh / HMR /
+   * server restart never restores task text (only in-memory state until you navigate away).
+   */
   React.useEffect(() => {
+    let raw = "";
+    let autorun = false;
     try {
-      const raw = sessionStorage.getItem(CONTEXTOS_INPUT_KEY);
-      if (raw != null && raw.length > 0) {
-        setState((s) => ({ ...s, inputText: raw }));
-      }
+      raw = sessionStorage.getItem(CONTEXTOS_INPUT_KEY) ?? "";
+      autorun = sessionStorage.getItem("contextos_autorun") === "1";
+      sessionStorage.removeItem(CONTEXTOS_INPUT_KEY);
+      sessionStorage.removeItem("contextos_autorun");
     } catch {
       /* ignore */
     }
+    const task = raw.trim();
+    if (raw.length > 0) {
+      setState((s) => ({ ...s, inputText: raw }));
+    }
+    if (autorun && task) {
+      void runOrchestrate(task);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** Landing “Run” sets `contextos_autorun` so we navigate to /run and start the same orchestration as the dashboard Run control. */
+  /** Seed “Ready” row uses a fixed ts for hydration; refresh to wall-clock once mounted. */
   React.useEffect(() => {
-    let shouldRun = false;
-    let task = "";
-    try {
-      if (sessionStorage.getItem("contextos_autorun") !== "1") return;
-      sessionStorage.removeItem("contextos_autorun");
-      shouldRun = true;
-      task = (sessionStorage.getItem(CONTEXTOS_INPUT_KEY) ?? "").trim();
-    } catch {
-      return;
-    }
-    if (!shouldRun || !task) return;
-    void runOrchestrate(task);
-    // One-shot after mount; omit `runOrchestrate` to avoid re-running when the callback identity changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setState((s) => ({
+      ...s,
+      trace: s.trace.map((e) => (e.id === INITIAL_TRACE_ID ? { ...e, ts: Date.now() } : e))
+    }));
   }, []);
 
   React.useEffect(() => {
@@ -350,6 +373,301 @@ export function Dashboard() {
     setState((s) => ({ ...s, agents: { ...s.agents, [agent]: status } }));
   }
 
+  function handleOrchestrateSse(event: string, data: unknown) {
+    if (event === "refined" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const refined = typeof d.refined === "string" ? d.refined : "";
+      const skipped = d.skipped === true;
+      if (refined) {
+        setState((s) => ({ ...s, inputText: refined }));
+      }
+      pushTrace({
+        actor: "system",
+        kind: "action",
+        title: skipped ? "Refine skipped" : "Task refined",
+        detail: skipped
+          ? "Using your text as-is (no refinement LLM)."
+          : refined.length > 0
+            ? refined.length > 2200
+              ? `${refined.slice(0, 2200)}…`
+              : refined
+            : "Using your input as-is."
+      });
+    }
+    if (event === "plan" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const phases =
+        (d.phases as
+          | Array<
+              Array<{
+                id: string;
+                role: string;
+                instruction: string;
+                allowed_context_keys?: string[];
+              }>
+            >
+          | undefined) ?? [];
+      let stepNum = 0;
+      const spawnPlan: SpawnStep[] = [];
+      const nextAgents: Record<string, AgentStatus> = {};
+      for (let pi = 0; pi < phases.length; pi += 1) {
+        const phase = phases[pi];
+        for (const row of phase) {
+          stepNum += 1;
+          const roleTitle = row.role.trim() || humanizeAgentId(row.id);
+          const instruction =
+            typeof row.instruction === "string" ? row.instruction.trim() : "";
+          const keys = Array.isArray(row.allowed_context_keys)
+            ? row.allowed_context_keys.map(String).filter(Boolean)
+            : [];
+          spawnPlan.push({
+            step: stepNum,
+            phaseIndex: pi,
+            agent: row.id,
+            roleTitle,
+            instruction,
+            allowedContextKeys: keys.length > 0 ? keys : ["task"]
+          });
+          nextAgents[row.id] = "idle";
+        }
+      }
+      planStepsRef.current = spawnPlan;
+      const cx = (d.complexity as string | undefined)?.toLowerCase();
+      const complexityLevel: ComplexityLevel | null =
+        cx === "low" || cx === "medium" || cx === "high" || cx === "extreme" ? (cx as ComplexityLevel) : null;
+      const orchPlan = parseOrchestratorPlanJson(data);
+      setState((s) => ({
+        ...s,
+        complexityLevel,
+        managerReasoning: typeof d.reasoning === "string" ? d.reasoning : s.managerReasoning,
+        spawnPlan,
+        agents: nextAgents,
+        selectedAgent: spawnPlan[0]?.agent ?? s.selectedAgent,
+        isManagerLoading: false,
+        orchestratorPlan: orchPlan ?? s.orchestratorPlan
+      }));
+      pushTrace({
+        actor: "system",
+        kind: "action",
+        title: "Plan ready",
+        detail: `${spawnPlan.length} step${spawnPlan.length === 1 ? "" : "s"}${
+          complexityLevel ? ` · ${titleCaseDifficulty(complexityLevel)} complexity` : ""
+        }`
+      });
+    }
+    if (event === "prefetch" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      if (d.status === "done") {
+        pushTrace({
+          actor: "system",
+          kind: "action",
+          title: "Fetched linked pages",
+          detail:
+            Array.isArray(d.urls) && d.urls.length > 0
+              ? `${d.urls.length} link${d.urls.length === 1 ? "" : "s"} pulled into context`
+              : "No URLs in the task text."
+        });
+      }
+    }
+    if (event === "meta" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      if (d.message === "orchestrator_resume") {
+        pushTrace({
+          actor: "system",
+          kind: "action",
+          title: "Continuing run",
+          detail: "Resuming after your approval."
+        });
+      }
+    }
+    if (event === "phase_start" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const ids = Array.isArray(d.subtask_ids) ? (d.subtask_ids as string[]).join(", ") : "";
+      pushTrace({
+        actor: "system",
+        kind: "action",
+        title: `Batch ${Number(d.phase_index) + 1}`,
+        detail: ids ? `Running together: ${ids}` : "Starting parallel work in this batch."
+      });
+    }
+    if (event === "agent_start" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const id = String(d.id ?? "");
+      const keys = Array.isArray(d.allowed_context_keys) ? d.allowed_context_keys.map(String) : [];
+      if (id) {
+        setState((s) => ({
+          ...s,
+          agents: { ...s.agents, [id]: "running" },
+          loadedContext: { ...s.loadedContext, [id]: keys }
+        }));
+      }
+      const label = String(d.role ?? "").trim() || formatAgentLabel(id, planStepsRef.current);
+      pushTrace({
+        actor: id || "system",
+        kind: "action",
+        title: `${label} started`,
+        detail: keys.length ? `Using only: ${keys.join(", ")}` : String(d.instruction ?? "").slice(0, 400)
+      });
+    }
+    if (event === "agent_done" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const id = String(d.id ?? "");
+      const needsAp = Boolean(d.needs_approval);
+      const apprReason = typeof d.approval_reason === "string" ? d.approval_reason.trim() : "";
+      const summary = String(d.summary ?? "");
+      const artifactPayload: WorkerArtifact = {
+        summary,
+        artifact: "artifact" in d ? d.artifact : null,
+        notes: typeof d.notes === "string" ? d.notes : null,
+        needs_approval: needsAp,
+        approval_reason: apprReason || null
+      };
+      if (id) {
+        setState((s) => ({
+          ...s,
+          agents: { ...s.agents, [id]: needsAp ? "warn" : "ok" },
+          artifacts: { ...s.artifacts, [id]: artifactPayload }
+        }));
+      }
+      const label = id ? formatAgentLabel(id, planStepsRef.current) : "Agent";
+      if (needsAp) {
+        const why = apprReason || "Review this step before you rely on it or take action based on it.";
+        const body = summary ? (summary.length > 900 ? `${summary.slice(0, 900)}…` : summary) : "";
+        pushTrace({
+          actor: id || "system",
+          kind: "breakpoint",
+          title: `${label} needs your review`,
+          detail: body ? `${why}\n\n—\n${body}` : why
+        });
+      } else {
+        pushTrace({
+          actor: id || "system",
+          kind: "action",
+          title: `${label} finished`,
+          detail: summary.length > 1200 ? `${summary.slice(0, 1200)}…` : summary
+        });
+      }
+    }
+    if (event === "approval_required" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const raw = d.items;
+      const items: ApprovalItem[] = Array.isArray(raw)
+        ? raw
+            .filter((x): x is Record<string, unknown> => x != null && typeof x === "object")
+            .map((x) => ({
+              id: String(x.id ?? ""),
+              role: String(x.role ?? "").trim() || "Step",
+              reason: String(x.reason ?? "").trim() || "Confirm this output before using it."
+            }))
+            .filter((x) => x.reason.length > 0)
+        : [];
+      setApprovalNotice(items.length > 0 ? items : null);
+    }
+    if (event === "merge_start") {
+      pushTrace({ actor: "system", kind: "action", title: "Combining results", detail: "Turning step outputs into one answer." });
+    }
+    if (event === "phase_paused" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const runId = String(d.run_id ?? (d as { runId?: unknown }).runId ?? "").trim();
+      const completed = Number(d.completed_phase_index ?? d.completedPhaseIndex);
+      const total = Number(d.total_phases ?? d.totalPhases);
+      const nextStep = d.next_step === "merge" || d.nextStep === "merge" ? "merge" : "phase";
+      if (runId.length > 0 && Number.isFinite(completed) && Number.isFinite(total) && total >= 1) {
+        setPauseGate({
+          runId,
+          completedPhaseIndex: Math.max(0, completed),
+          totalPhases: total,
+          nextStep
+        });
+      }
+      setState((s) => ({ ...s, isRunning: false, isManagerLoading: false }));
+      pushTrace({
+        actor: "system",
+        kind: "breakpoint",
+        title: `Batch ${completed + 1} of ${total} complete`,
+        detail:
+          nextStep === "merge"
+            ? "Approve below to merge all step outputs into the final answer."
+            : "Approve below to run the next batch of agents."
+      });
+    }
+    if (event === "final" && data && typeof data === "object") {
+      const d = data as Record<string, unknown>;
+      const result = d.result;
+      const resultStr = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+      setPauseGate(null);
+      setState((s) => ({
+        ...s,
+        isRunning: false,
+        isManagerLoading: false,
+        output: {
+          title: "",
+          summary: "",
+          sections: [
+            {
+              h: "Output",
+              p: resultStr.slice(0, 14_000) + (resultStr.length > 14_000 ? "\n…[truncated]" : "")
+            },
+            ...(s.managerReasoning.trim()
+              ? [
+                  {
+                    h: "Explanation",
+                    p: s.managerReasoning.slice(0, 2500) + (s.managerReasoning.length > 2500 ? "…" : "")
+                  }
+                ]
+              : [])
+          ]
+        }
+      }));
+      pushTrace({ actor: "system", kind: "action", title: "Done", detail: "Merge finished." });
+    }
+    if (event === "error") {
+      const msg =
+        data && typeof data === "object" && data !== null && "message" in data
+          ? String((data as { message?: unknown }).message)
+          : String(data ?? "Unknown error");
+      setPauseGate(null);
+      setState((s) => ({ ...s, isRunning: false, isManagerLoading: false }));
+      pushTrace({ actor: "system", kind: "action", title: "Run failed", detail: msg });
+    }
+  }
+
+  async function continueOrchestrate() {
+    const runId = pauseGate?.runId;
+    if (!runId || state.isRunning) return;
+    setState((s) => ({ ...s, isRunning: true }));
+    pushTrace({
+      actor: "human",
+      kind: "action",
+      title: "Approved",
+      detail:
+        pauseGate?.nextStep === "merge"
+          ? "Continuing to merge step outputs."
+          : "Continuing with the next batch."
+    });
+    try {
+      const res = await fetch("/api/orchestrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: runId, continue: true })
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText.slice(0, 500) || `HTTP ${res.status}`);
+      }
+      await consumeSseJson(res, handleOrchestrateSse);
+      setState((s) => (s.isRunning ? { ...s, isRunning: false, isManagerLoading: false } : s));
+    } catch (error) {
+      setState((s) => ({ ...s, isRunning: false, isManagerLoading: false }));
+      pushTrace({
+        actor: "system",
+        kind: "action",
+        title: "Continue failed",
+        detail: error instanceof Error ? error.message : "Unknown error"
+      });
+    }
+  }
+
   async function runOrchestrate(overrideTask?: string) {
     const task = (overrideTask ?? state.inputText).trim();
     if (!task) {
@@ -365,6 +683,8 @@ export function Dashboard() {
     if (state.isRunning || state.isManagerLoading) {
       return;
     }
+
+    const refine = state.refineBeforeRun;
 
     setState((s) => ({
       ...s,
@@ -388,6 +708,7 @@ export function Dashboard() {
     setAgentDetailId(null);
     planStepsRef.current = [];
     setApprovalNotice(null);
+    setPauseGate(null);
     setRevisionFeedback({});
     setRevisePendingId(null);
     pushTrace({ actor: "system", kind: "action", title: "Started", detail: "Sending your task to the orchestrator." });
@@ -396,216 +717,18 @@ export function Dashboard() {
       const res = await fetch("/api/orchestrate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task })
+        body: JSON.stringify({ task, refine })
       });
       if (!res.ok) {
         const errText = await res.text();
         throw new Error(errText.slice(0, 500) || `HTTP ${res.status}`);
       }
 
-      await consumeSseJson(res, (event, data) => {
-        if (event === "plan" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const phases =
-            (d.phases as
-              | Array<
-                  Array<{
-                    id: string;
-                    role: string;
-                    instruction: string;
-                    allowed_context_keys?: string[];
-                  }>
-                >
-              | undefined) ?? [];
-          let stepNum = 0;
-          const spawnPlan: SpawnStep[] = [];
-          const nextAgents: Record<string, AgentStatus> = {};
-          for (let pi = 0; pi < phases.length; pi += 1) {
-            const phase = phases[pi];
-            for (const row of phase) {
-              stepNum += 1;
-              const roleTitle = row.role.trim() || humanizeAgentId(row.id);
-              const summary =
-                row.instruction.length > 180 ? `${row.instruction.slice(0, 180)}…` : row.instruction;
-              const keys = Array.isArray(row.allowed_context_keys)
-                ? row.allowed_context_keys.map(String).filter(Boolean)
-                : [];
-              spawnPlan.push({
-                step: stepNum,
-                phaseIndex: pi,
-                agent: row.id,
-                roleTitle,
-                label: summary,
-                allowedContextKeys: keys.length > 0 ? keys : ["task"]
-              });
-              nextAgents[row.id] = "idle";
-            }
-          }
-          planStepsRef.current = spawnPlan;
-          const cx = (d.complexity as string | undefined)?.toLowerCase();
-          const complexityLevel: ComplexityLevel | null =
-            cx === "low" || cx === "medium" || cx === "high" || cx === "extreme" ? (cx as ComplexityLevel) : null;
-          const orchPlan = parseOrchestratorPlanJson(data);
-          setState((s) => ({
-            ...s,
-            complexityLevel,
-            managerReasoning: typeof d.reasoning === "string" ? d.reasoning : s.managerReasoning,
-            spawnPlan,
-            agents: nextAgents,
-            selectedAgent: spawnPlan[0]?.agent ?? s.selectedAgent,
-            isManagerLoading: false,
-            orchestratorPlan: orchPlan ?? s.orchestratorPlan
-          }));
-          pushTrace({
-            actor: "system",
-            kind: "action",
-            title: "Plan ready",
-            detail: `${spawnPlan.length} step${spawnPlan.length === 1 ? "" : "s"}${
-              complexityLevel ? ` · ${titleCaseDifficulty(complexityLevel)} complexity` : ""
-            }`
-          });
-        }
-        if (event === "prefetch" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          if (d.status === "done") {
-            pushTrace({
-              actor: "system",
-              kind: "action",
-              title: "Fetched linked pages",
-              detail:
-                Array.isArray(d.urls) && d.urls.length > 0
-                  ? `${d.urls.length} link${d.urls.length === 1 ? "" : "s"} pulled into context`
-                  : "No URLs in the task text."
-            });
-          }
-        }
-        if (event === "phase_start" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const ids = Array.isArray(d.subtask_ids) ? (d.subtask_ids as string[]).join(", ") : "";
-          pushTrace({
-            actor: "system",
-            kind: "action",
-            title: `Batch ${Number(d.phase_index) + 1}`,
-            detail: ids ? `Running together: ${ids}` : "Starting parallel work in this batch."
-          });
-        }
-        if (event === "agent_start" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const id = String(d.id ?? "");
-          const keys = Array.isArray(d.allowed_context_keys) ? d.allowed_context_keys.map(String) : [];
-          if (id) {
-            setState((s) => ({
-              ...s,
-              agents: { ...s.agents, [id]: "running" },
-              loadedContext: { ...s.loadedContext, [id]: keys }
-            }));
-          }
-          const label = String(d.role ?? "").trim() || formatAgentLabel(id, planStepsRef.current);
-          pushTrace({
-            actor: id || "system",
-            kind: "action",
-            title: `${label} started`,
-            detail: keys.length ? `Using only: ${keys.join(", ")}` : String(d.instruction ?? "").slice(0, 400)
-          });
-        }
-        if (event === "agent_done" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const id = String(d.id ?? "");
-          const needsAp = Boolean(d.needs_approval);
-          const apprReason = typeof d.approval_reason === "string" ? d.approval_reason.trim() : "";
-          const summary = String(d.summary ?? "");
-          const artifactPayload: WorkerArtifact = {
-            summary,
-            artifact: "artifact" in d ? d.artifact : null,
-            notes: typeof d.notes === "string" ? d.notes : null,
-            needs_approval: needsAp,
-            approval_reason: apprReason || null
-          };
-          if (id) {
-            setState((s) => ({
-              ...s,
-              agents: { ...s.agents, [id]: needsAp ? "warn" : "ok" },
-              artifacts: { ...s.artifacts, [id]: artifactPayload }
-            }));
-          }
-          const label = id ? formatAgentLabel(id, planStepsRef.current) : "Agent";
-          if (needsAp) {
-            const why = apprReason || "Review this step before you rely on it or take action based on it.";
-            const body = summary ? (summary.length > 900 ? `${summary.slice(0, 900)}…` : summary) : "";
-            pushTrace({
-              actor: id || "system",
-              kind: "breakpoint",
-              title: `${label} needs your review`,
-              detail: body ? `${why}\n\n—\n${body}` : why
-            });
-          } else {
-            pushTrace({
-              actor: id || "system",
-              kind: "action",
-              title: `${label} finished`,
-              detail: summary.length > 1200 ? `${summary.slice(0, 1200)}…` : summary
-            });
-          }
-        }
-        if (event === "approval_required" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const raw = d.items;
-          const items: ApprovalItem[] = Array.isArray(raw)
-            ? raw
-                .filter((x): x is Record<string, unknown> => x != null && typeof x === "object")
-                .map((x) => ({
-                  id: String(x.id ?? ""),
-                  role: String(x.role ?? "").trim() || "Step",
-                  reason: String(x.reason ?? "").trim() || "Confirm this output before using it."
-                }))
-                .filter((x) => x.reason.length > 0)
-            : [];
-          setApprovalNotice(items.length > 0 ? items : null);
-        }
-        if (event === "merge_start") {
-          pushTrace({ actor: "system", kind: "action", title: "Combining results", detail: "Turning step outputs into one answer." });
-        }
-        if (event === "final" && data && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          const result = d.result;
-          const resultStr = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-          setState((s) => ({
-            ...s,
-            isRunning: false,
-            isManagerLoading: false,
-            output: {
-              title: "",
-              summary: "",
-              sections: [
-                {
-                  h: "Output",
-                  p: resultStr.slice(0, 14_000) + (resultStr.length > 14_000 ? "\n…[truncated]" : "")
-                },
-                ...(s.managerReasoning.trim()
-                  ? [
-                      {
-                        h: "Explanation",
-                        p: s.managerReasoning.slice(0, 2500) + (s.managerReasoning.length > 2500 ? "…" : "")
-                      }
-                    ]
-                  : [])
-              ]
-            }
-          }));
-          pushTrace({ actor: "system", kind: "action", title: "Done", detail: "Merge finished." });
-        }
-        if (event === "error") {
-          const msg =
-            data && typeof data === "object" && data !== null && "message" in data
-              ? String((data as { message?: unknown }).message)
-              : String(data ?? "Unknown error");
-          setState((s) => ({ ...s, isRunning: false, isManagerLoading: false }));
-          pushTrace({ actor: "system", kind: "action", title: "Run failed", detail: msg });
-        }
-      });
+      await consumeSseJson(res, handleOrchestrateSse);
 
       setState((s) => (s.isRunning ? { ...s, isRunning: false, isManagerLoading: false } : s));
     } catch (error) {
+      setPauseGate(null);
       setState((s) => ({ ...s, isRunning: false, isManagerLoading: false }));
       pushTrace({
         actor: "system",
@@ -617,9 +740,19 @@ export function Dashboard() {
   }
 
   function resetDemo() {
-    setState(createInitialState());
+    const t = Date.now();
+    setState(() => {
+      const s = createInitialState();
+      return {
+        ...s,
+        trace: s.trace.map((e) =>
+          e.id === INITIAL_TRACE_ID ? { ...e, ts: t } : e
+        )
+      };
+    });
     planStepsRef.current = [];
     setApprovalNotice(null);
+    setPauseGate(null);
     setRevisionFeedback({});
     setRevisePendingId(null);
     setVaultModalOpen(false);
@@ -627,6 +760,7 @@ export function Dashboard() {
     setAgentDetailId(null);
     try {
       sessionStorage.removeItem(CONTEXTOS_INPUT_KEY);
+      sessionStorage.removeItem("contextos_autorun");
     } catch {
       /* ignore */
     }
@@ -835,12 +969,12 @@ export function Dashboard() {
 
   return (
     <div className="flex min-h-dvh flex-col bg-zinc-950 text-zinc-100">
-      <header className="shrink-0 border-b border-white/10 px-4 py-3">
+      <header className="shrink-0 border-b border-white/10 p-4">
         <div className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-row flex-wrap items-center justify-between gap-3">
           <Link
             href="/"
             aria-label="OsanoAI home"
-            className="flex items-center gap-2 rounded-lg text-zinc-100 outline-none transition-opacity hover:opacity-90 focus-visible:rounded-lg focus-visible:ring-2 focus-visible:ring-indigo-500/35 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
+            className="flex items-center gap-2 rounded-lg pl-2 text-zinc-100 outline-none transition-opacity hover:opacity-90 focus-visible:rounded-lg focus-visible:ring-2 focus-visible:ring-indigo-500/35 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950"
           >
             <span className="flex shrink-0 items-center justify-center">
               <SparkIcon className="h-5 w-5 text-indigo-200" />
@@ -852,7 +986,27 @@ export function Dashboard() {
               <LockIcon className="h-4 w-4" />
               Context
             </Button>
-            <Button variant="primary" size="sm" onClick={() => void runOrchestrate()} disabled={state.isManagerLoading || state.isRunning}>
+            {pauseGate ? (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => void continueOrchestrate()}
+                disabled={state.isRunning}
+                title={
+                  pauseGate.nextStep === "merge"
+                    ? "Merge all step outputs into the final answer"
+                    : "Run the next batch of agents"
+                }
+              >
+                {pauseGate.nextStep === "merge" ? "Approve merge" : "Continue"}
+              </Button>
+            ) : null}
+            <Button
+              variant={pauseGate ? "secondary" : "primary"}
+              size="sm"
+              onClick={() => void runOrchestrate()}
+              disabled={state.isManagerLoading || state.isRunning}
+            >
               <PlayIcon className="h-4 w-4" />
               {state.isManagerLoading ? "Running…" : "Run"}
             </Button>
@@ -864,52 +1018,97 @@ export function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-1 flex-col gap-4 px-4 py-4 min-h-0">
-        <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+      <main className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-1 flex-col gap-4 p-4 min-h-0">
+        <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <span className="text-sm font-semibold tracking-tight text-zinc-100">Task</span>
             <span className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-xs text-zinc-500">
               <span className="whitespace-nowrap">Complexity</span>
-              <Badge
-                tone={complexityTone(state.complexityLevel)}
-                size="md"
-                className={state.complexityLevel === null ? "text-zinc-500" : undefined}
-              >
+              <Badge tone={complexityTone(state.complexityLevel)} size="compact">
                 {complexityBadgeLabel(state.complexityLevel)}
               </Badge>
             </span>
           </div>
+          <label className="flex cursor-pointer select-none items-center gap-2 text-[11px] text-zinc-500">
+            <input
+              type="checkbox"
+              checked={state.refineBeforeRun}
+              disabled={state.isRunning || state.isManagerLoading}
+              onChange={(e) => setState((s) => ({ ...s, refineBeforeRun: e.target.checked }))}
+              className="h-3.5 w-3.5 shrink-0 rounded border-white/20 bg-zinc-900 text-indigo-500 focus:ring-2 focus:ring-indigo-500/35 disabled:opacity-40"
+            />
+            <span>
+              Refine task first{" "}
+              <span className="text-zinc-600">(extra LLM — turn off for faster demo)</span>
+            </span>
+          </label>
           <textarea
             value={state.inputText}
             onChange={(e) => {
               const v = e.target.value;
               setState((s) => ({ ...s, inputText: v }));
-              try {
-                sessionStorage.setItem(CONTEXTOS_INPUT_KEY, v);
-              } catch {
-                /* ignore */
-              }
             }}
             rows={4}
             className={cx(
               "hide-scrollbar min-h-[88px] max-h-40 w-full resize-y rounded-xl border border-white/15 bg-black/35 px-3 py-2.5 text-sm leading-relaxed text-zinc-100",
-              "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] placeholder:text-zinc-500",
+              "shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] placeholder:text-zinc-300 placeholder:opacity-100 placeholder:leading-snug",
               "focus:border-indigo-400/35 focus:outline-none focus:ring-2 focus:ring-indigo-500/35"
             )}
-            placeholder="Describe what you want done. Include links if the task needs page content."
+            placeholder={TASK_INPUT_PLACEHOLDER}
           />
         </div>
+
+        {pauseGate ? (
+          <Callout tone="warn" className="flex shrink-0 flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-zinc-100">
+                {pauseGate.nextStep === "merge"
+                  ? `All ${pauseGate.totalPhases} batch${pauseGate.totalPhases === 1 ? "" : "es"} finished`
+                  : `Batch ${pauseGate.completedPhaseIndex + 1} of ${pauseGate.totalPhases} finished`}
+              </p>
+              <p className="mt-1 text-xs leading-snug text-zinc-400">
+                {pauseGate.nextStep === "merge"
+                  ? "Press Continue or Approve merge (top right) to combine step outputs into the final answer."
+                  : "Press Continue (top right) to run the next parallel batch. Agent badges marked Review are optional step-level flags from the model, not this gate."}
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              className="shrink-0"
+              disabled={state.isRunning}
+              onClick={() => void continueOrchestrate()}
+            >
+              {pauseGate.nextStep === "merge" ? "Approve merge" : "Continue"}
+            </Button>
+          </Callout>
+        ) : null}
 
         <div className="relative z-40 shrink-0 isolate">
           <Card className="overflow-visible">
               <CardHeader className="shrink-0">
-                <CardTitle className="flex-wrap items-center gap-2">
+                <CardTitle className="flex-col items-stretch gap-1 !pb-0">
+                <div className="flex flex-wrap items-center gap-2">
                   <span>Agents</span>
-                  <ChipMeta>Workers: {agentQueueRows.length}</ChipMeta>
-                </CardTitle>
-                <p className={cx("mt-1", traceIntroClass)}>
-                  Each chip shows the worker name and status. Click to pin details; double-click opens Context.
-                </p>
+                  <span
+                    className={cx(
+                      "inline-flex h-7 min-w-[1.75rem] shrink-0 items-center justify-center rounded-lg",
+                      "bg-white/[0.06] px-2 text-xs font-semibold tabular-nums text-zinc-200"
+                    )}
+                    aria-label={`${agentQueueRows.length} workers`}
+                  >
+                    {agentQueueRows.length}
+                  </span>
+                </div>
+                {pauseGate ? (
+                  <p className="text-[11px] font-normal leading-snug text-amber-200/85">
+                    Pipeline paused — use{" "}
+                    <span className="font-semibold text-amber-100">Continue</span> in the header to{" "}
+                    {pauseGate.nextStep === "merge" ? "merge the final answer" : "start the next batch"}.
+                  </p>
+                ) : null}
+              </CardTitle>
               </CardHeader>
               <CardBody className="overflow-visible pt-0">
                 {agentQueueRows.length > 0 ? (
@@ -941,9 +1140,9 @@ export function Dashboard() {
                 </div>
                 ) : (
                   <EmptyWell>
-                    <p className="text-sm font-medium text-zinc-300">No agents deployed yet</p>
-                    <p className={cx("mx-auto mt-2 max-w-md", traceIntroClass)}>
-                      Enter a task above, then press Run. When the orchestrator returns a plan, each worker appears here with live status.
+                    <p className="text-sm font-medium text-zinc-300">No agents deployed</p>
+                    <p className="mx-auto mt-2 max-w-md text-sm leading-snug text-zinc-400">
+                      Start a task to track agent activities.
                     </p>
                   </EmptyWell>
                 )}
@@ -968,14 +1167,21 @@ export function Dashboard() {
                   </div>
                   <div className="mt-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      <Badge tone="info" size="md">
+                      <Badge tone="info" size="compact">
                         Batch {agentDetailRow.step.phaseIndex + 1}
                       </Badge>
-                      <Badge tone={statusTone[agentDetailRow.status]} size="md">
+                      <Badge tone={statusTone[agentDetailRow.status]} size="compact">
                         {statusLabel[agentDetailRow.status]}
                       </Badge>
                     </div>
-                    <p className="mt-3 whitespace-pre-wrap leading-relaxed text-zinc-300">{agentDetailRow.step.label}</p>
+                    <div
+                      className={cx(
+                        SECTION_PAD,
+                        "hide-scrollbar mt-3 max-h-64 overflow-y-auto rounded-lg border border-white/[0.06] bg-black/25 text-sm leading-relaxed text-zinc-300"
+                      )}
+                    >
+                      <p className="whitespace-pre-wrap">{agentDetailRow.step.instruction}</p>
+                    </div>
                     {agentDetailRow.waitHint ? (
                       <Callout tone="warn" className="mt-2">
                         {agentDetailRow.waitHint}
@@ -998,44 +1204,44 @@ export function Dashboard() {
         </div>
 
         <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2 lg:items-stretch">
-          <Card className="flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]">
-            <CardHeader className="shrink-0">
+          <Card
+            className={cx(
+              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]",
+              "!border-0 !shadow-none"
+            )}
+          >
+            <CardHeader className="shrink-0 !pt-3 !pb-1">
               <CardTitle className="min-h-[2rem] flex-wrap items-center justify-between gap-x-3 gap-y-2">
                 <span className="leading-none">Activity</span>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
                   {state.isManagerLoading && state.isRunning ? (
-                    <Badge tone="warn" size="md">
+                    <Badge tone="warn" size="compact">
                       Planning
                     </Badge>
                   ) : state.isRunning ? (
-                    <Badge tone="info" size="md">
+                    <Badge tone="info" size="compact">
                       In progress
                     </Badge>
+                  ) : pauseGate ? (
+                    <Badge tone="warn" size="compact">
+                      Awaiting approval
+                    </Badge>
                   ) : (
-                    <Badge tone="neutral" size="md">
+                    <Badge tone="neutral" size="compact">
                       Idle
                     </Badge>
                   )}
                 </div>
               </CardTitle>
             </CardHeader>
-            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 pt-0">
-              <p className={cx("shrink-0", traceIntroClass)}>
-                Execution trace — agents and status live in the Agents panel above.
-              </p>
+            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 !pt-3">
               <div
                 ref={activityLogRef}
                 className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain"
               >
-                <div className="divide-y divide-white/[0.06]">
+                <div className={cx(SURFACE_CARD_INNER, "flex min-h-full min-w-0 flex-col gap-3")}>
                   {state.trace.map((e) => (
-                    <div
-                      key={e.id}
-                      className={cx(
-                        "border-l-2 py-3 pl-4 pr-3 text-xs leading-snug",
-                        traceKindAccent(e.kind)
-                      )}
-                    >
+                    <div key={e.id} className={traceRowClasses(e.actor)}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
                           {actorBadge(e.actor, state.spawnPlan)}
@@ -1043,12 +1249,19 @@ export function Dashboard() {
                             {e.kind}
                           </Badge>
                         </div>
-                        <span className="shrink-0 pt-0.5 text-[10px] tabular-nums text-zinc-500">{formatTime(e.ts)}</span>
+                        <span
+                          suppressHydrationWarning
+                          className="shrink-0 pt-0.5 text-[10px] tabular-nums text-zinc-500"
+                        >
+                          {formatTime(e.ts)}
+                        </span>
                       </div>
-                      <div className="mt-2 font-medium leading-snug text-zinc-100">{e.title}</div>
-                      {e.detail ? (
-                        <div className="mt-1.5 whitespace-pre-wrap text-zinc-400">{e.detail}</div>
-                      ) : null}
+                      <div className="mt-2">
+                        <div className="font-medium leading-snug text-zinc-100">{e.title}</div>
+                        {e.detail ? (
+                          <div className="mt-1.5 whitespace-pre-wrap text-zinc-400">{e.detail}</div>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1056,24 +1269,30 @@ export function Dashboard() {
             </CardBody>
           </Card>
 
-          <Card className="flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]">
-            <CardHeader className="shrink-0">
+          <Card
+            className={cx(
+              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]",
+              "!border-0 !shadow-none"
+            )}
+          >
+            <CardHeader className="shrink-0 !pb-1">
               <CardTitle className="min-h-[2rem] items-center">Results</CardTitle>
             </CardHeader>
-            <CardBody className="flex min-h-0 flex-1 flex-col overflow-hidden pt-0">
+            <CardBody className="flex min-h-0 flex-1 flex-col overflow-hidden !pt-3">
               <div
                 ref={resultsPanelRef}
-                className="hide-scrollbar flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overflow-x-hidden overscroll-contain"
+                className="hide-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain"
               >
+                <div className={cx(SURFACE_CARD_INNER, "flex min-h-full min-w-0 flex-1 flex-col gap-3")}>
               {approvalNotice && approvalNotice.length > 0 ? (
-                <div className="shrink-0 rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm">
+                <div className={cx("shrink-0 rounded-xl border-0 bg-amber-500/[0.08] text-sm", SECTION_PAD)}>
                   <div className="font-semibold text-amber-100">Human review suggested</div>
                   <p className="mt-1 text-[13px] leading-relaxed text-amber-100/85">
                     At least one step is not safe to apply blindly. Below is what needs your judgment and why.
                   </p>
                   <ul className="mt-3 list-none space-y-4 pl-0">
                     {approvalNotice.map((item) => (
-                      <li key={item.id} className="border-t border-amber-400/20 pt-4 first:border-t-0 first:pt-0">
+                      <li key={item.id} className="border-t border-amber-950/25 pt-4 first:border-t-0 first:pt-0">
                         <div className="font-medium text-zinc-100">{item.role}</div>
                         <p className="mt-1 text-[13px] leading-relaxed text-zinc-300">{item.reason}</p>
                         <div className="mt-3 flex flex-wrap gap-2">
@@ -1087,7 +1306,7 @@ export function Dashboard() {
                             Accept as-is
                           </Button>
                         </div>
-                        <div className="mt-3 rounded-lg border border-white/10 bg-black/25 p-3">
+                        <div className={cx("mt-3", SURFACE_RESULTS_BLOCK)}>
                           <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-zinc-500">
                             Disapprove — tell the model what to fix
                           </label>
@@ -1100,7 +1319,7 @@ export function Dashboard() {
                             placeholder="e.g. Use fewer assumptions; cite only the first source; don’t recommend medication."
                             disabled={revisePendingId !== null}
                             className={cx(
-                              "hide-scrollbar w-full resize-y rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-[13px] leading-relaxed text-zinc-100",
+                              "hide-scrollbar w-full resize-y rounded-lg border-0 bg-black/40 px-3 py-2.5 text-[13px] leading-relaxed text-zinc-100",
                               "placeholder:text-zinc-600 focus:border-amber-400/35 focus:outline-none focus:ring-2 focus:ring-amber-500/25"
                             )}
                           />
@@ -1131,7 +1350,7 @@ export function Dashboard() {
                 <AgentMap plan={state.orchestratorPlan} agentStatus={derivedAgentStatusMap} />
               ) : null}
               {state.spawnPlan.length > 0 ? (
-                <div className="shrink-0 rounded-xl border border-white/10 bg-black/25 p-3">
+                <div className={cx("shrink-0", SURFACE_RESULTS_BLOCK)}>
                   <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Plan</div>
                   <ol className="mt-2 list-decimal space-y-2 pl-5 text-xs text-zinc-300">
                     {state.spawnPlan.map((step) => (
@@ -1144,14 +1363,21 @@ export function Dashboard() {
                             Batch {step.phaseIndex + 1}
                           </Badge>
                         </span>
-                        <span className="mt-0.5 block text-zinc-500">{step.label}</span>
+                        <div
+                          className={cx(
+                            SECTION_PAD,
+                            "hide-scrollbar mt-1.5 max-h-52 overflow-y-auto rounded-md border border-white/[0.05] bg-black/20 text-[11px] leading-relaxed text-zinc-400"
+                          )}
+                        >
+                          <span className="block whitespace-pre-wrap">{step.instruction}</span>
+                        </div>
                       </li>
                     ))}
                   </ol>
                 </div>
               ) : null}
               {(state.output.title || state.output.summary) ? (
-                <div className="shrink-0">
+                <div className={cx("shrink-0", SURFACE_RESULTS_BLOCK)}>
                   {state.output.title ? (
                     <div className="text-sm font-semibold text-zinc-100">{state.output.title}</div>
                   ) : null}
@@ -1161,13 +1387,14 @@ export function Dashboard() {
               <div className="space-y-3">
                 <div className="flex flex-col gap-4">
                   {state.output.sections.map((s, i) => (
-                    <div key={`out-sec-${i}-${s.h}`} className="rounded-xl border border-white/10 bg-black/25 p-3">
+                    <div key={`out-sec-${i}-${s.h}`} className={SURFACE_RESULTS_BLOCK}>
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{s.h}</div>
                       <div className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{s.p}</div>
                     </div>
                   ))}
                 </div>
               </div>
+                </div>
               </div>
             </CardBody>
           </Card>
@@ -1176,32 +1403,32 @@ export function Dashboard() {
 
       {vaultModalOpen ? (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/80 p-3 backdrop-blur-sm sm:items-center"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-zinc-950/45 p-3 backdrop-blur-[2px] sm:items-center"
           role="presentation"
           onClick={() => setVaultModalOpen(false)}
         >
           <div
             role="dialog"
             aria-label="Context"
-            className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/12 bg-zinc-900 shadow-2xl"
+            className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-white/10 bg-zinc-900 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 p-4">
               <div className="min-w-0 flex-1">
-                <h2 className="text-sm font-semibold text-zinc-50">Context</h2>
+                <h2 className="text-sm font-semibold text-zinc-100">Context</h2>
                 <p className="text-[11px] text-zinc-500">What each step may read and what was passed at run time</p>
               </div>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8 w-8 shrink-0 rounded-lg p-0 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100"
+                className="h-10 w-10 shrink-0 rounded-lg p-0 text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100"
                 aria-label="Close"
                 onClick={() => setVaultModalOpen(false)}
               >
-                <XIcon className="h-4 w-4" />
+                <XIcon className="h-6 w-6" />
               </Button>
             </div>
-            <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto px-4 py-4 space-y-4 text-xs">
+            <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto p-4 space-y-4 text-xs">
               <div>
                 <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-zinc-500">Step</label>
                 <Select
@@ -1294,7 +1521,7 @@ export function Dashboard() {
 
                   <div className="rounded-xl border border-emerald-400/20 bg-emerald-500/5 p-3">
                     <div className="font-medium text-emerald-100/90">Output footprint</div>
-                    <p className="mt-1 text-zinc-400">{vaultFootprint}</p>
+                    <p className="mt-1 text-zinc-500">{vaultFootprint}</p>
                   </div>
                 </>
               )}

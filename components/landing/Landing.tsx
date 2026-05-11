@@ -2,19 +2,36 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Button, Card, CardBody, CardHeader, CardTitle } from "@/components/ui";
-import { SparkIcon } from "@/components/ui/icons";
-import { CONTEXTOS_INPUT_KEY } from "@/lib/session-input";
+import { ArrowRightIcon, SparkIcon } from "@/components/ui/icons";
+import { CONTEXTOS_INPUT_KEY, TASK_INPUT_PLACEHOLDER } from "@/lib/session-input";
 import { cx } from "@/lib/utils";
+
+/** Slightly larger than the original 280px cap; min height bumped from 68px. */
+const TASK_FIELD_MAX_PX = 300;
 
 export function Landing() {
   const router = useRouter();
   const [text, setText] = React.useState("");
+  const taskFieldRef = React.useRef<HTMLTextAreaElement>(null);
 
+  const syncTaskFieldHeight = React.useCallback(() => {
+    const el = taskFieldRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(el.scrollHeight, TASK_FIELD_MAX_PX);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > TASK_FIELD_MAX_PX ? "auto" : "hidden";
+  }, []);
+
+  React.useLayoutEffect(() => {
+    syncTaskFieldHeight();
+  }, [text, syncTaskFieldHeight]);
+
+  /** Drop any stale handoff keys so task text is never restored after refresh or server restart. */
   React.useEffect(() => {
     try {
-      const saved = sessionStorage.getItem(CONTEXTOS_INPUT_KEY);
-      if (saved) setText(saved);
+      sessionStorage.removeItem(CONTEXTOS_INPUT_KEY);
+      sessionStorage.removeItem("contextos_autorun");
     } catch {
       /* ignore */
     }
@@ -31,7 +48,7 @@ export function Landing() {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 px-4 py-12 text-zinc-100">
+    <div className="flex min-h-dvh flex-col items-center justify-center bg-zinc-950 p-6 text-zinc-100">
       <div className="w-full max-w-3xl">
         <div className="mb-8 flex items-center justify-center gap-4">
           <div className="flex shrink-0 items-center justify-center">
@@ -40,27 +57,34 @@ export function Landing() {
           <h1 className="text-2xl font-semibold tracking-tight">OsanoAI</h1>
         </div>
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle>Task</CardTitle>
-          </CardHeader>
-          <CardBody className="space-y-4 pt-0">
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              rows={5}
-              className={cx(
-                "hide-scrollbar min-h-[120px] w-full resize-y rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm leading-relaxed",
-                "placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
-              )}
-              placeholder="Describe what you want done — context, goals, and constraints."
-              autoComplete="off"
-            />
-            <Button variant="primary" size="sm" className="w-full" onClick={continueToRun}>
-              Run task
-            </Button>
-          </CardBody>
-        </Card>
+        <div className="relative w-full">
+          <textarea
+            ref={taskFieldRef}
+            value={text}
+            rows={2}
+            onChange={(e) => setText(e.target.value)}
+            className={cx(
+              "hide-scrollbar min-h-[110px] max-h-[300px] w-full resize-none overflow-hidden rounded-xl border-0 bg-white/[0.1] px-4 py-4 pr-12 text-sm leading-relaxed text-zinc-100",
+              "placeholder:text-zinc-300 placeholder:opacity-100 placeholder:leading-snug",
+              "focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+            )}
+            placeholder={TASK_INPUT_PLACEHOLDER}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={continueToRun}
+            aria-label="Run task"
+            className={cx(
+              "absolute right-3 top-3 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-0",
+              "bg-indigo-600 text-white",
+              "transition hover:bg-indigo-500 active:bg-indigo-700",
+              "focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/35"
+            )}
+          >
+            <ArrowRightIcon className="h-4 w-4" />
+          </button>
+        </div>
       </div>
     </div>
   );
