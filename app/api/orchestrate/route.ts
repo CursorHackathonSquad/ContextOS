@@ -1,6 +1,4 @@
 import { buildContextMarkdown } from "@/lib/context/bundle";
-import { fetchPagesFromInput, pagesToContextText } from "@/lib/context/fetch-core";
-import { extractUrls } from "@/lib/context/extract-urls";
 import { mergeOrchestratorOutputs } from "@/lib/orchestrator/merge";
 import { buildOrchestratorPlan } from "@/lib/orchestrator/plan";
 import {
@@ -61,7 +59,6 @@ async function runSinglePhase(
   send: (e: string, d: unknown) => void,
   workTask: string,
   plan: OrchestratorPlan,
-  urlsFetched: string,
   artifacts: Record<string, WorkerArtifact>,
   phaseIndex: number
 ) {
@@ -76,12 +73,7 @@ async function runSinglePhase(
         instruction: sub.instruction,
         allowed_context_keys: sub.allowed_context_keys
       });
-      const contextMarkdown = buildContextMarkdown(
-        sub.allowed_context_keys,
-        workTask,
-        artifacts,
-        urlsFetched
-      );
+      const contextMarkdown = buildContextMarkdown(sub.allowed_context_keys, workTask, artifacts);
       const out = await runSubtaskWorker({
         task: workTask,
         subtask: sub,
@@ -164,14 +156,7 @@ export async function POST(req: Request) {
             return;
           }
 
-          await runSinglePhase(
-            send,
-            st.workTask,
-            st.plan,
-            st.urlsFetched,
-            st.artifacts,
-            st.nextPhaseIndex
-          );
+          await runSinglePhase(send, st.workTask, st.plan, st.artifacts, st.nextPhaseIndex);
 
           const completedPi = st.nextPhaseIndex;
           const nextIdx = completedPi + 1;
@@ -229,21 +214,6 @@ export async function POST(req: Request) {
           degraded
         });
 
-        let urlsFetched = "";
-        const urlSource = [workTask, task].filter((s) => s.trim().length > 0).join("\n\n");
-        const urls = extractUrls(urlSource);
-        if (urls.length > 0) {
-          send("prefetch", { status: "started", url_count: urls.length });
-          const batch = await fetchPagesFromInput(urlSource);
-          urlsFetched = pagesToContextText(batch.pages);
-          send("prefetch", {
-            status: "done",
-            urls: batch.urls,
-            urls_truncated: batch.urls_truncated,
-            budget_ms: batch.budget_ms
-          });
-        }
-
         if (plan.phases.length === 0) {
           send("error", { message: "Orchestrator returned no phases." });
           return;
@@ -252,7 +222,7 @@ export async function POST(req: Request) {
         const runId = crypto.randomUUID();
         const artifacts: Record<string, WorkerArtifact> = {};
 
-        await runSinglePhase(send, workTask, plan, urlsFetched, artifacts, 0);
+        await runSinglePhase(send, workTask, plan, artifacts, 0);
 
         const nextIdx = 1;
         putPausedRun({
@@ -260,7 +230,6 @@ export async function POST(req: Request) {
           plan,
           workTask,
           originalTask: task,
-          urlsFetched,
           artifacts,
           nextPhaseIndex: nextIdx,
           degraded,

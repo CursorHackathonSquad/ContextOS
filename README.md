@@ -14,8 +14,8 @@ Next.js app: landing task input → **`/run`** dashboard with orchestrator plan,
 | `app/api/orchestrate/` | Plan + workers + merge (SSE) |
 | `app/api/orchestrate/revise-step/` | Rerun one step with feedback |
 | `lib/orchestrator/` | Plan, merge, workers, types |
-| `lib/context/` | Context bundle, URL fetch (used by orchestrator) |
-| `lib/net/` | SSE client, SSRF guard |
+| `lib/context/` | Context bundle for workers (task + prior artifacts) |
+| `lib/net/` | SSE client |
 | `lib/ai/` | OpenAI-compatible client + token budgets |
 
 ## Environment

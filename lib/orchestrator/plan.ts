@@ -12,7 +12,7 @@ const SCHEMA = `{
         "id": "unique_snake_id",
         "role": "free-form role title — any string",
         "instruction": "what this agent must produce",
-        "allowed_context_keys": ["task", "urls_fetched", "artifact:other_id"]
+        "allowed_context_keys": ["task", "artifact:other_id"]
       }
     ]
   ],
@@ -41,7 +41,7 @@ function fallbackPlan(task: string): OrchestratorPlan {
           role: "Task analyst",
           instruction:
             "Extract goals, constraints, and deliverable expectations from the task. Summarize unknowns.",
-          allowed_context_keys: ["task", "urls_fetched"]
+          allowed_context_keys: ["task"]
         }
       ],
       [
@@ -49,7 +49,7 @@ function fallbackPlan(task: string): OrchestratorPlan {
           id: "produce",
           role: "Executor",
           instruction: "Produce the final answer the user asked for, using prior analysis when helpful.",
-          allowed_context_keys: ["task", "urls_fetched", "artifact:discover"]
+          allowed_context_keys: ["task", "artifact:discover"]
         }
       ]
     ],
@@ -96,7 +96,10 @@ function coerceSubtasks(raw: unknown, task: string): OrchestratorSubtask[][] {
             : "Complete your part of the task.";
       let allowed_context_keys: string[] = ["task"];
       if (Array.isArray(o.allowed_context_keys)) {
-        allowed_context_keys = o.allowed_context_keys.map((x) => String(x).trim()).filter(Boolean);
+        allowed_context_keys = o.allowed_context_keys
+          .map((x) => String(x).trim())
+          .filter(Boolean)
+          .filter((k) => k !== "urls_fetched");
       }
       if (allowed_context_keys.length === 0) allowed_context_keys = ["task"];
       phase.push({ id, role, instruction, allowed_context_keys });
@@ -151,7 +154,6 @@ export async function buildOrchestratorPlan(task: string): Promise<{ plan: Orche
     "Execution model: `phases` is an array of phases run in order. Inside each phase, ALL subtasks run IN PARALLEL.",
     "Later phases may reference prior outputs using allowed_context_keys entries like artifact:<subtask_id>.",
     "Include the key `task` when the agent should see the original request.",
-    "Include `urls_fetched` only when the task implies URLs will be prefetched server-side (pages as plain text).",
     "Do NOT hardcode fixed agent personas — invent roles appropriate to this task.",
     "For every subtask, `role` MUST be a short human job title YOU assign as orchestrator admin (how this worker appears in the UI), e.g. \"Literature reviewer\", \"API draft\", \"Risk checker\" — not generic labels like \"Agent 1\".",
     "Reply with a single JSON object only. No markdown fences.",
