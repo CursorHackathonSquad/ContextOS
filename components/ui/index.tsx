@@ -20,7 +20,7 @@ export function Card(props: React.HTMLAttributes<HTMLDivElement>) {
 
 export function CardHeader(props: React.HTMLAttributes<HTMLDivElement>) {
   const { className, ...rest } = props;
-  return <div className={cx("px-4 pt-4 pb-4", className)} {...rest} />;
+  return <div className={cx("px-5 pt-4 pb-4", className)} {...rest} />;
 }
 
 export function CardTitle(props: React.HTMLAttributes<HTMLDivElement>) {
@@ -38,7 +38,7 @@ export function CardTitle(props: React.HTMLAttributes<HTMLDivElement>) {
 
 export function CardBody(props: React.HTMLAttributes<HTMLDivElement>) {
   const { className, ...rest } = props;
-  return <div className={cx("p-4 pt-0", className)} {...rest} />;
+  return <div className={cx("px-4 pb-4", className)} {...rest} />;
 }
 
 export function Button(
@@ -242,7 +242,7 @@ export const Select = React.forwardRef(function Select(
 });
 
 /** Shared visual tokens for {@link Badge}, {@link Callout}, and related chips. */
-export const BADGE_TONES = {
+const BADGE_TONES = {
   neutral: "border-white/10 bg-white/[0.04] text-zinc-200",
   ok: "border-emerald-400/20 bg-emerald-500/10 text-emerald-200",
   warn: "border-amber-400/20 bg-amber-500/10 text-amber-200",
@@ -348,7 +348,7 @@ export function InsetPanel({ className, ...rest }: React.HTMLAttributes<HTMLDivE
   return (
     <div
       className={cx(
-        "rounded-xl border border-white/10 bg-black/35 p-4 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]",
+        "rounded-xl border border-white/10 bg-black/35 px-3 py-3.5 text-xs shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)]",
         className
       )}
       {...rest}
@@ -361,7 +361,7 @@ export function PanelRow({ className, ...rest }: React.HTMLAttributes<HTMLDivEle
   return (
     <div
       className={cx(
-        "flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs",
+        "flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2.5 py-2 text-xs",
         className
       )}
       {...rest}

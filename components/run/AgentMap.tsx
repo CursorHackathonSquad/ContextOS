@@ -3,7 +3,12 @@
 import * as React from "react";
 import { Badge, PanelRow, type BadgeTone } from "@/components/ui";
 import type { OrchestratorPlan, OrchestratorSubtask } from "@/lib/orchestrator/types";
-import { SECTION_PAD, SURFACE_ACTIVITY_AGENT, SURFACE_ACTIVITY_NEUTRAL } from "@/lib/ui-surfaces";
+import {
+  INNER_PAD_X,
+  SECTION_PAD,
+  SURFACE_ACTIVITY_AGENT,
+  SURFACE_ACTIVITY_NEUTRAL
+} from "@/lib/ui-surfaces";
 import { cx } from "@/lib/utils";
 
 type AgentStatus = "idle" | "running" | "blocked" | "ok" | "warn" | "err";
@@ -113,7 +118,7 @@ function AgentTile({
           </Badge>
         ) : null}
       </div>
-      <div className="hide-scrollbar mt-2 max-h-48 min-h-0 overflow-y-auto rounded-md border border-white/[0.05] bg-black/20 px-0 pb-2 pt-1 text-[11px] leading-relaxed text-zinc-400">
+      <div className="hide-scrollbar mt-2 max-h-48 min-h-0 overflow-y-auto rounded-md border border-white/[0.05] bg-black/20 px-2.5 pb-2 pt-1 text-[11px] leading-relaxed text-zinc-400">
         <p className="whitespace-pre-wrap">{subtask.instruction}</p>
       </div>
       <div className="mt-2 flex flex-wrap gap-1">
@@ -145,7 +150,7 @@ export function AgentMap({
   const handoffs = collectArtifactHandoffs(plan);
 
   return (
-    <div className={cx(SECTION_PAD, SURFACE_ACTIVITY_NEUTRAL)}>
+    <div className={cx(INNER_PAD_X, "pb-3 pt-1.5", SURFACE_ACTIVITY_NEUTRAL)}>
       <div className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Agent map</div>
       <p className="mt-1 text-[11px] leading-relaxed text-zinc-500">
         Only the <span className="text-zinc-400">Orchestrator (Admin)</span> creates workers — it assigns each{" "}

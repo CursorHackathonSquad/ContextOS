@@ -23,9 +23,10 @@ import { parseOrchestratorPlanJson } from "@/lib/orchestrator/plan-json";
 import { consumeSseJson } from "@/lib/net/sse-client";
 import type { OrchestratorPlan, WorkerArtifact } from "@/lib/orchestrator/types";
 import {
+  INNER_PAD_X,
   SECTION_PAD,
-  SURFACE_ACTIVITY_AGENT,
-  SURFACE_ACTIVITY_NEUTRAL,
+  SURFACE_ACTIVITY_TRACE_AGENT,
+  SURFACE_ACTIVITY_TRACE_NEUTRAL,
   SURFACE_CARD_INNER,
   SURFACE_RESULTS_BLOCK
 } from "@/lib/ui-surfaces";
@@ -246,7 +247,7 @@ function traceRowClasses(actor: TraceEvent["actor"]): string {
   return cx(
     SECTION_PAD,
     "text-xs leading-snug",
-    agent ? SURFACE_ACTIVITY_AGENT : SURFACE_ACTIVITY_NEUTRAL
+    agent ? SURFACE_ACTIVITY_TRACE_AGENT : SURFACE_ACTIVITY_TRACE_NEUTRAL
   );
 }
 
@@ -375,10 +376,6 @@ export function Dashboard() {
       ...s,
       trace: [...s.trace, { id: uid("tr"), ts: event.ts ?? now(), actor: event.actor, kind: event.kind, title: event.title, detail: event.detail }]
     }));
-  }
-
-  function setAgentStatus(agent: AgentKey, status: AgentStatus) {
-    setState((s) => ({ ...s, agents: { ...s.agents, [agent]: status } }));
   }
 
   function handleOrchestrateSse(event: string, data: unknown) {
@@ -980,28 +977,13 @@ export function Dashboard() {
               Context
             </Button>
             <Button
-              variant={pauseGate && !state.isRunning ? "secondary" : "primary"}
+              variant="primary"
               size="sm"
               onClick={() => void runOrchestrate()}
               disabled={state.isManagerLoading || state.isRunning}
             >
               <PlayIcon className="h-4 w-4" />
               {state.isManagerLoading ? "Running…" : "Run"}
-            </Button>
-            <Button
-              variant={pauseGate && !state.isRunning ? "primary" : "secondary"}
-              size="sm"
-              onClick={() => void continueOrchestrate()}
-              disabled={!pauseGate || state.isRunning}
-              title={
-                pauseGate
-                  ? pauseGate.nextStep === "merge"
-                    ? "Merge all step outputs into the final answer"
-                    : "Run the next batch of agents"
-                  : "Enabled when a batch finishes — advances to the next batch or final merge"
-              }
-            >
-              {pauseGate?.nextStep === "merge" ? "Approve merge" : "Continue"}
             </Button>
             <Button variant="danger" size="sm" onClick={resetDemo}>
               <ResetIcon className="h-4 w-4" />
@@ -1013,33 +995,44 @@ export function Dashboard() {
 
       <main className="mx-auto flex w-full max-w-[min(1600px,100%)] flex-1 flex-col gap-4 p-4 min-h-0">
         <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
-          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pl-1">
             <span className="text-sm font-semibold tracking-tight text-zinc-100">Task</span>
             <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
-              <label className="flex cursor-pointer select-none items-center gap-2 text-[11px] text-zinc-500">
+              <label
+                className={cx(
+                  "inline-flex h-7 min-h-7 cursor-pointer select-none items-center gap-2 rounded-xl border px-3 text-xs font-medium transition focus-within:outline-none focus-within:ring-2 focus-within:ring-indigo-500/35",
+                  state.refineBeforeRun
+                    ? "border-indigo-400/30 bg-indigo-500/15 text-indigo-50 shadow-[0_0_0_1px_rgba(99,102,241,0.12)]"
+                    : "border-white/10 bg-white/[0.04] text-zinc-200 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] hover:bg-white/[0.06]",
+                  (state.isRunning || state.isManagerLoading) && "pointer-events-none cursor-not-allowed opacity-40"
+                )}
+              >
                 <input
                   type="checkbox"
                   checked={state.refineBeforeRun}
                   disabled={state.isRunning || state.isManagerLoading}
                   onChange={(e) => setState((s) => ({ ...s, refineBeforeRun: e.target.checked }))}
-                  className="h-3.5 w-3.5 shrink-0 rounded border-white/20 bg-zinc-900 text-indigo-500 focus:ring-2 focus:ring-indigo-500/35 disabled:opacity-40"
+                  className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-white/25 bg-black/35 text-indigo-500 accent-indigo-500 focus:ring-0 focus:ring-offset-0 disabled:cursor-not-allowed"
                 />
-                <span>Refine task</span>
+                <span className="whitespace-nowrap">Refine task</span>
               </label>
-              <span className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-zinc-500">
-                <span className="whitespace-nowrap">Complexity</span>
-                <span
-                  title={
-                    state.spawnPlan.length > 0
-                      ? `Derived from batch count (${Math.max(...state.spawnPlan.map((s) => s.phaseIndex)) + 1} batches)`
-                      : "Derived from planned batches after Run"
-                  }
-                  className="inline-flex"
+              <span
+                title={
+                  state.spawnPlan.length > 0
+                    ? `Derived from batch count (${Math.max(...state.spawnPlan.map((s) => s.phaseIndex)) + 1} batches)`
+                    : "Derived from planned batches after Run"
+                }
+                className="inline-flex shrink-0"
+              >
+                <Badge
+                  tone={complexityTone(state.complexityLevel)}
+                  size="md"
+                  className="h-7 min-h-7 !rounded-xl !px-3 !py-0 text-xs font-semibold tabular-nums leading-none gap-1.5"
                 >
-                  <Badge tone={complexityTone(state.complexityLevel)} size="compact">
-                    {complexityBadgeLabel(state.complexityLevel)}
-                  </Badge>
-                </span>
+                  <span className="font-normal opacity-80">Complexity</span>
+                  <span className="opacity-60">·</span>
+                  <span>{complexityBadgeLabel(state.complexityLevel)}</span>
+                </Badge>
               </span>
             </div>
           </div>
@@ -1069,8 +1062,8 @@ export function Dashboard() {
               </p>
               <p className="mt-1 text-xs leading-snug text-zinc-400">
                 {pauseGate.nextStep === "merge"
-                  ? "Press Continue / Approve merge in the header (next to Run) to combine step outputs into the final answer."
-                  : "Press Continue in the header (next to Run) to run the next parallel batch. “Review” on a chip is optional step-level flagging, not this gate."}
+                  ? "Use Continue / Approve merge in this banner to combine step outputs into the final answer."
+                  : "Use Continue in this banner to run the next parallel batch. “Review” on a chip is optional step-level flagging, not this gate."}
               </p>
             </div>
             <Button
@@ -1090,11 +1083,11 @@ export function Dashboard() {
           <Card className="overflow-visible">
               <CardHeader className="shrink-0">
                 <CardTitle className="flex-col items-stretch gap-1 !pb-0">
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 pl-1">
                   <span>Agents</span>
                   <span
                     className={cx(
-                      "inline-flex h-7 min-w-[1.75rem] shrink-0 items-center justify-center rounded-lg",
+                      "inline-flex h-6 min-w-[1.5rem] shrink-0 items-center justify-center rounded-lg",
                       "bg-white/[0.06] px-2 text-xs font-semibold tabular-nums text-zinc-200"
                     )}
                     aria-label={`${agentQueueRows.length} workers`}
@@ -1105,7 +1098,7 @@ export function Dashboard() {
                 {pauseGate ? (
                   <p className="text-[11px] font-normal leading-snug text-amber-200/85">
                     Pipeline paused — use{" "}
-                    <span className="font-semibold text-amber-100">Continue</span> beside Run in the header to{" "}
+                    <span className="font-semibold text-amber-100">Continue</span> in the banner above to{" "}
                     {pauseGate.nextStep === "merge" ? "merge the final answer" : "start the next batch"}.
                   </p>
                 ) : null}
@@ -1177,7 +1170,8 @@ export function Dashboard() {
                     </div>
                     <div
                       className={cx(
-                        SECTION_PAD,
+                        INNER_PAD_X,
+                        "pb-3 pt-1.5",
                         "hide-scrollbar mt-3 max-h-64 overflow-y-auto rounded-lg border border-white/[0.06] bg-black/25 text-sm leading-relaxed text-zinc-300"
                       )}
                     >
@@ -1207,11 +1201,10 @@ export function Dashboard() {
         <div className="relative z-10 grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2 lg:items-stretch">
           <Card
             className={cx(
-              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]",
-              "!border-0 !shadow-none"
+              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]"
             )}
           >
-            <CardHeader className="shrink-0 !pt-3 !pb-1">
+            <CardHeader className="shrink-0">
               <CardTitle className="min-h-[2rem] flex-wrap items-center justify-between gap-x-3 gap-y-2">
                 <span className="leading-none">Activity</span>
                 <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
@@ -1235,7 +1228,7 @@ export function Dashboard() {
                 </div>
               </CardTitle>
             </CardHeader>
-            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 !pt-3">
+            <CardBody className="flex min-h-0 flex-1 flex-col gap-3 !px-4 sm:!px-5">
               <div
                 ref={activityLogRef}
                 className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain"
@@ -1257,7 +1250,7 @@ export function Dashboard() {
                           {formatTime(e.ts)}
                         </span>
                       </div>
-                      <div className="mt-2">
+                      <div className="mt-3 pl-1">
                         <div className="font-medium leading-snug text-zinc-100">{e.title}</div>
                         {e.detail ? (
                           <div className="mt-1.5 whitespace-pre-wrap text-zinc-400">{e.detail}</div>
@@ -1272,21 +1265,20 @@ export function Dashboard() {
 
           <Card
             className={cx(
-              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]",
-              "!border-0 !shadow-none"
+              "flex min-h-0 flex-col overflow-hidden max-lg:min-h-[400px] lg:min-h-[min(70vh,640px)] lg:max-h-[min(70vh,720px)]"
             )}
           >
-            <CardHeader className="shrink-0 !pb-1">
+            <CardHeader className="shrink-0">
               <CardTitle className="min-h-[2rem] items-center">Results</CardTitle>
             </CardHeader>
-            <CardBody className="flex min-h-0 flex-1 flex-col overflow-hidden !pt-3">
+            <CardBody className="flex min-h-0 flex-1 flex-col overflow-hidden ! sm:!px-5">
               <div
                 ref={resultsPanelRef}
                 className="hide-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain"
               >
                 <div className={cx(SURFACE_CARD_INNER, "flex min-h-full min-w-0 flex-1 flex-col gap-3")}>
               {approvalNotice && approvalNotice.length > 0 ? (
-                <div className={cx("shrink-0 rounded-xl border-0 bg-amber-500/[0.08] text-sm", SECTION_PAD)}>
+                <div className={cx("shrink-0 rounded-xl border-0 bg-amber-500/[0.08] text-sm", INNER_PAD_X, "pb-3 pt-1.5")}>
                   <div className="font-semibold text-amber-100">Human review suggested</div>
                   <p className="mt-1 text-[13px] leading-relaxed text-amber-100/85">
                     At least one step is not safe to apply blindly. Below is what needs your judgment and why.
@@ -1320,7 +1312,7 @@ export function Dashboard() {
                             placeholder="e.g. Use fewer assumptions; cite only the first source; don’t recommend medication."
                             disabled={revisePendingId !== null}
                             className={cx(
-                              "hide-scrollbar w-full resize-y rounded-lg border-0 bg-black/40 px-3 py-2.5 text-[13px] leading-relaxed text-zinc-100",
+                              "hide-scrollbar w-full resize-y rounded-lg border-0 bg-black/40 px-2.5 py-2.5 text-[13px] leading-relaxed text-zinc-100",
                               "placeholder:text-zinc-600 focus:border-amber-400/35 focus:outline-none focus:ring-2 focus:ring-amber-500/25"
                             )}
                           />
@@ -1366,7 +1358,8 @@ export function Dashboard() {
                         </span>
                         <div
                           className={cx(
-                            SECTION_PAD,
+                            INNER_PAD_X,
+                            "pb-2 pt-1",
                             "hide-scrollbar mt-1.5 max-h-52 overflow-y-auto rounded-md border border-white/[0.05] bg-black/20 text-[11px] leading-relaxed text-zinc-400"
                           )}
                         >
