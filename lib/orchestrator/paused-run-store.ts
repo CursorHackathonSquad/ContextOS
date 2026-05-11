@@ -5,7 +5,6 @@ export type PausedOrchestratorState = {
   plan: OrchestratorPlan;
   workTask: string;
   originalTask: string;
-  urlsFetched: string;
   artifacts: Record<string, WorkerArtifact>;
   /** Index of the next phase to run (0-based). When >= plan.phases.length, only merge remains. */
   nextPhaseIndex: number;

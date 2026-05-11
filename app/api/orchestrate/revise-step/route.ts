@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 import { buildContextMarkdown } from "@/lib/context/bundle";
-import { fetchPagesFromInput, pagesToContextText } from "@/lib/context/fetch-core";
-import { extractUrls } from "@/lib/context/extract-urls";
 import { mergeOrchestratorOutputs } from "@/lib/orchestrator/merge";
 import type { OrchestratorPlan, OrchestratorSubtask, WorkerArtifact } from "@/lib/orchestrator/types";
 import { parseArtifactsJson, parseOrchestratorPlanJson } from "@/lib/orchestrator/plan-json";
@@ -54,15 +52,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "That step is not in the plan." }, { status: 400 });
     }
 
-    let urlsFetched = "";
-    const urls = extractUrls(task);
-    if (urls.length > 0) {
-      const batch = await fetchPagesFromInput(task);
-      urlsFetched = pagesToContextText(batch.pages);
-    }
-
     const priorArtifact = artifacts[subtaskId] as WorkerArtifact;
-    const contextMarkdown = buildContextMarkdown(sub.allowed_context_keys, task, artifacts, urlsFetched);
+    const contextMarkdown = buildContextMarkdown(sub.allowed_context_keys, task, artifacts);
 
     const out = await runSubtaskWorkerRevision({
       task,

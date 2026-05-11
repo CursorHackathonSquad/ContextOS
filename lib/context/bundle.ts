@@ -4,14 +4,12 @@ import type { WorkerArtifact } from "@/lib/orchestrator/types";
  * Builds the user message body for a worker from orchestrator-selected keys only.
  * Supported keys:
  * - `task` — original user task string
- * - `urls_fetched` — prefetched page text (if executor populated it)
  * - `artifact:<subtask_id>` — JSON output from a prior phase subtask
  */
 export function buildContextMarkdown(
   keys: string[],
   task: string,
-  artifacts: Record<string, WorkerArtifact>,
-  urlsFetched: string
+  artifacts: Record<string, WorkerArtifact>
 ): string {
   const sections: string[] = [];
 
@@ -21,14 +19,6 @@ export function buildContextMarkdown(
 
     if (key === "task") {
       sections.push("## Task\n\n" + (task.trim() || "(empty)"));
-      continue;
-    }
-
-    if (key === "urls_fetched") {
-      sections.push(
-        "## urls_fetched\n\n" +
-          (urlsFetched.trim() ? urlsFetched.trim() : "(none — no URLs or fetch not run / empty)")
-      );
       continue;
     }
 

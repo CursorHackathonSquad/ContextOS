@@ -178,7 +178,6 @@ function deriveAgentDisplay(
 function describeContextKey(key: string): string {
   const k = key.trim();
   if (k === "task") return "Original task text";
-  if (k === "urls_fetched") return "Prefetched text from URLs in the task";
   if (k.startsWith("artifact:")) {
     const id = k.slice("artifact:".length).trim();
     return id ? `Prior step output (${id})` : k;
@@ -219,6 +218,15 @@ function complexityTone(level: ComplexityLevel | null): BadgeTone {
 function complexityBadgeLabel(level: ComplexityLevel | null): string {
   if (level === null) return "—";
   return titleCaseDifficulty(level);
+}
+
+/** Orchestrator may emit its own complexity; we surface difficulty from batch count for demos. */
+function complexityFromBatchCount(batchCount: number): ComplexityLevel | null {
+  if (batchCount < 1) return null;
+  if (batchCount === 1) return "low";
+  if (batchCount === 2) return "medium";
+  if (batchCount === 3) return "high";
+  return "extreme";
 }
 
 function traceKindTone(kind: TraceKind): BadgeTone {
@@ -432,9 +440,8 @@ export function Dashboard() {
         }
       }
       planStepsRef.current = spawnPlan;
-      const cx = (d.complexity as string | undefined)?.toLowerCase();
-      const complexityLevel: ComplexityLevel | null =
-        cx === "low" || cx === "medium" || cx === "high" || cx === "extreme" ? (cx as ComplexityLevel) : null;
+      const batchCount = phases.length;
+      const complexityLevel = complexityFromBatchCount(batchCount);
       const orchPlan = parseOrchestratorPlanJson(data);
       setState((s) => ({
         ...s,
@@ -450,24 +457,10 @@ export function Dashboard() {
         actor: "system",
         kind: "action",
         title: "Plan ready",
-        detail: `${spawnPlan.length} step${spawnPlan.length === 1 ? "" : "s"}${
-          complexityLevel ? ` · ${titleCaseDifficulty(complexityLevel)} complexity` : ""
-        }`
+        detail: `${spawnPlan.length} step${spawnPlan.length === 1 ? "" : "s"} · ${batchCount} batch${
+          batchCount === 1 ? "" : "es"
+        }${complexityLevel ? ` → ${titleCaseDifficulty(complexityLevel)} complexity (by batches)` : ""}`
       });
-    }
-    if (event === "prefetch" && data && typeof data === "object") {
-      const d = data as Record<string, unknown>;
-      if (d.status === "done") {
-        pushTrace({
-          actor: "system",
-          kind: "action",
-          title: "Fetched linked pages",
-          detail:
-            Array.isArray(d.urls) && d.urls.length > 0
-              ? `${d.urls.length} link${d.urls.length === 1 ? "" : "s"} pulled into context`
-              : "No URLs in the task text."
-        });
-      }
     }
     if (event === "meta" && data && typeof data === "object") {
       const d = data as Record<string, unknown>;
@@ -986,29 +979,29 @@ export function Dashboard() {
               <LockIcon className="h-4 w-4" />
               Context
             </Button>
-            {pauseGate ? (
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={() => void continueOrchestrate()}
-                disabled={state.isRunning}
-                title={
-                  pauseGate.nextStep === "merge"
-                    ? "Merge all step outputs into the final answer"
-                    : "Run the next batch of agents"
-                }
-              >
-                {pauseGate.nextStep === "merge" ? "Approve merge" : "Continue"}
-              </Button>
-            ) : null}
             <Button
-              variant={pauseGate ? "secondary" : "primary"}
+              variant={pauseGate && !state.isRunning ? "secondary" : "primary"}
               size="sm"
               onClick={() => void runOrchestrate()}
               disabled={state.isManagerLoading || state.isRunning}
             >
               <PlayIcon className="h-4 w-4" />
               {state.isManagerLoading ? "Running…" : "Run"}
+            </Button>
+            <Button
+              variant={pauseGate && !state.isRunning ? "primary" : "secondary"}
+              size="sm"
+              onClick={() => void continueOrchestrate()}
+              disabled={!pauseGate || state.isRunning}
+              title={
+                pauseGate
+                  ? pauseGate.nextStep === "merge"
+                    ? "Merge all step outputs into the final answer"
+                    : "Run the next batch of agents"
+                  : "Enabled when a batch finishes — advances to the next batch or final merge"
+              }
+            >
+              {pauseGate?.nextStep === "merge" ? "Approve merge" : "Continue"}
             </Button>
             <Button variant="danger" size="sm" onClick={resetDemo}>
               <ResetIcon className="h-4 w-4" />
@@ -1022,26 +1015,34 @@ export function Dashboard() {
         <div className="flex shrink-0 flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <span className="text-sm font-semibold tracking-tight text-zinc-100">Task</span>
-            <span className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-xs text-zinc-500">
-              <span className="whitespace-nowrap">Complexity</span>
-              <Badge tone={complexityTone(state.complexityLevel)} size="compact">
-                {complexityBadgeLabel(state.complexityLevel)}
-              </Badge>
-            </span>
+            <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
+              <label className="flex cursor-pointer select-none items-center gap-2 text-[11px] text-zinc-500">
+                <input
+                  type="checkbox"
+                  checked={state.refineBeforeRun}
+                  disabled={state.isRunning || state.isManagerLoading}
+                  onChange={(e) => setState((s) => ({ ...s, refineBeforeRun: e.target.checked }))}
+                  className="h-3.5 w-3.5 shrink-0 rounded border-white/20 bg-zinc-900 text-indigo-500 focus:ring-2 focus:ring-indigo-500/35 disabled:opacity-40"
+                />
+                <span>Refine task</span>
+              </label>
+              <span className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-zinc-500">
+                <span className="whitespace-nowrap">Complexity</span>
+                <span
+                  title={
+                    state.spawnPlan.length > 0
+                      ? `Derived from batch count (${Math.max(...state.spawnPlan.map((s) => s.phaseIndex)) + 1} batches)`
+                      : "Derived from planned batches after Run"
+                  }
+                  className="inline-flex"
+                >
+                  <Badge tone={complexityTone(state.complexityLevel)} size="compact">
+                    {complexityBadgeLabel(state.complexityLevel)}
+                  </Badge>
+                </span>
+              </span>
+            </div>
           </div>
-          <label className="flex cursor-pointer select-none items-center gap-2 text-[11px] text-zinc-500">
-            <input
-              type="checkbox"
-              checked={state.refineBeforeRun}
-              disabled={state.isRunning || state.isManagerLoading}
-              onChange={(e) => setState((s) => ({ ...s, refineBeforeRun: e.target.checked }))}
-              className="h-3.5 w-3.5 shrink-0 rounded border-white/20 bg-zinc-900 text-indigo-500 focus:ring-2 focus:ring-indigo-500/35 disabled:opacity-40"
-            />
-            <span>
-              Refine task first{" "}
-              <span className="text-zinc-600">(extra LLM — turn off for faster demo)</span>
-            </span>
-          </label>
           <textarea
             value={state.inputText}
             onChange={(e) => {
@@ -1068,8 +1069,8 @@ export function Dashboard() {
               </p>
               <p className="mt-1 text-xs leading-snug text-zinc-400">
                 {pauseGate.nextStep === "merge"
-                  ? "Press Continue or Approve merge (top right) to combine step outputs into the final answer."
-                  : "Press Continue (top right) to run the next parallel batch. Agent badges marked Review are optional step-level flags from the model, not this gate."}
+                  ? "Press Continue / Approve merge in the header (next to Run) to combine step outputs into the final answer."
+                  : "Press Continue in the header (next to Run) to run the next parallel batch. “Review” on a chip is optional step-level flagging, not this gate."}
               </p>
             </div>
             <Button
@@ -1104,7 +1105,7 @@ export function Dashboard() {
                 {pauseGate ? (
                   <p className="text-[11px] font-normal leading-snug text-amber-200/85">
                     Pipeline paused — use{" "}
-                    <span className="font-semibold text-amber-100">Continue</span> in the header to{" "}
+                    <span className="font-semibold text-amber-100">Continue</span> beside Run in the header to{" "}
                     {pauseGate.nextStep === "merge" ? "merge the final answer" : "start the next batch"}.
                   </p>
                 ) : null}
