@@ -14,6 +14,11 @@ function readEnvInt(name: string, fallback: number, min: number, max: number): n
   return clampInt(n, min, max);
 }
 
+/** Pre-orchestrator task refinement (goals, format, scope). */
+export function orchestratorRefineMaxTokens(): number {
+  return readEnvInt("ORCHESTRATOR_REFINE_MAX_TOKENS", 2400, 256, 8192);
+}
+
 /** Orchestrator JSON plan (phases, roles, context keys). */
 export function orchestratorPlanMaxTokens(): number {
   return readEnvInt("ORCHESTRATOR_PLAN_MAX_TOKENS", 2800, 512, 8192);

@@ -3,6 +3,13 @@ import { fetchPagesFromInput, pagesToContextText } from "@/lib/context/fetch-cor
 import { extractUrls } from "@/lib/context/extract-urls";
 import { mergeOrchestratorOutputs } from "@/lib/orchestrator/merge";
 import { buildOrchestratorPlan } from "@/lib/orchestrator/plan";
+import {
+  deletePausedRun,
+  getPausedRun,
+  putPausedRun,
+  type PausedOrchestratorState
+} from "@/lib/orchestrator/paused-run-store";
+import { refineUserTask } from "@/lib/orchestrator/refine";
 import type { OrchestratorPlan, WorkerArtifact } from "@/lib/orchestrator/types";
 import { runSubtaskWorker } from "@/lib/orchestrator/worker-run";
 
@@ -28,11 +35,107 @@ function sseEncode(event: string, data: unknown): Uint8Array {
   return encoder.encode(`event: ${event}\ndata: ${payload}\n\n`);
 }
 
+function sendApprovalItemsIfAny(
+  send: (e: string, d: unknown) => void,
+  plan: OrchestratorPlan,
+  artifacts: Record<string, WorkerArtifact>
+) {
+  const approvalItems: Array<{ id: string; role: string; reason: string }> = [];
+  for (const [aid, art] of Object.entries(artifacts)) {
+    if (art.needs_approval) {
+      approvalItems.push({
+        id: aid,
+        role: roleForSubtaskId(plan, aid),
+        reason:
+          art.approval_reason?.trim() ||
+          "This step requested human confirmation before you rely on or act on its output."
+      });
+    }
+  }
+  if (approvalItems.length > 0) {
+    send("approval_required", { items: approvalItems });
+  }
+}
+
+async function runSinglePhase(
+  send: (e: string, d: unknown) => void,
+  workTask: string,
+  plan: OrchestratorPlan,
+  urlsFetched: string,
+  artifacts: Record<string, WorkerArtifact>,
+  phaseIndex: number
+) {
+  const phase = plan.phases[phaseIndex];
+  send("phase_start", { phase_index: phaseIndex, subtask_ids: phase.map((s) => s.id) });
+
+  await Promise.all(
+    phase.map(async (sub) => {
+      send("agent_start", {
+        id: sub.id,
+        role: sub.role,
+        instruction: sub.instruction,
+        allowed_context_keys: sub.allowed_context_keys
+      });
+      const contextMarkdown = buildContextMarkdown(
+        sub.allowed_context_keys,
+        workTask,
+        artifacts,
+        urlsFetched
+      );
+      const out = await runSubtaskWorker({
+        task: workTask,
+        subtask: sub,
+        contextMarkdown,
+        orchestratorReasoning: plan.reasoning,
+        complexity: plan.complexity
+      });
+      artifacts[sub.id] = out;
+      send("agent_done", {
+        id: sub.id,
+        summary: out.summary,
+        artifact: out.artifact,
+        notes: out.notes,
+        needs_approval: Boolean(out.needs_approval),
+        approval_reason: out.approval_reason ?? null
+      });
+    })
+  );
+}
+
+async function finalizeMerge(
+  send: (e: string, d: unknown) => void,
+  workTask: string,
+  plan: OrchestratorPlan,
+  artifacts: Record<string, WorkerArtifact>
+) {
+  sendApprovalItemsIfAny(send, plan, artifacts);
+  send("merge_start", {});
+  const merged = await mergeOrchestratorOutputs({
+    task: workTask,
+    plan,
+    artifacts
+  });
+  send("final", { result: merged.result, format: merged.format });
+}
+
 export async function POST(req: Request) {
   let task = "";
+  let refineEnabled = true;
+  let runIdContinue: string | null = null;
+  let isContinue = false;
   try {
-    const body = (await req.json()) as { task?: string };
+    const body = (await req.json()) as {
+      task?: string;
+      refine?: boolean;
+      run_id?: string;
+      continue?: boolean;
+    };
     task = (body.task ?? "").trim();
+    refineEnabled = body.refine !== false;
+    if (body.continue === true && typeof body.run_id === "string" && body.run_id.trim()) {
+      isContinue = true;
+      runIdContinue = body.run_id.trim();
+    }
   } catch {
     task = "";
   }
@@ -44,9 +147,72 @@ export async function POST(req: Request) {
       };
 
       try {
+        if (isContinue && runIdContinue) {
+          const st = getPausedRun(runIdContinue);
+          if (!st) {
+            send("error", {
+              message: "This run expired or was already completed. Start a new task."
+            });
+            return;
+          }
+
+          send("meta", { ok: true, message: "orchestrator_resume", run_id: st.runId });
+
+          if (st.nextPhaseIndex >= st.plan.phases.length) {
+            await finalizeMerge(send, st.workTask, st.plan, st.artifacts);
+            deletePausedRun(st.runId);
+            return;
+          }
+
+          await runSinglePhase(
+            send,
+            st.workTask,
+            st.plan,
+            st.urlsFetched,
+            st.artifacts,
+            st.nextPhaseIndex
+          );
+
+          const completedPi = st.nextPhaseIndex;
+          const nextIdx = completedPi + 1;
+          const updated: PausedOrchestratorState = {
+            ...st,
+            artifacts: st.artifacts,
+            nextPhaseIndex: nextIdx,
+            createdAt: Date.now()
+          };
+          putPausedRun(updated);
+
+          send("phase_paused", {
+            run_id: st.runId,
+            completed_phase_index: completedPi,
+            total_phases: st.plan.phases.length,
+            next_step: nextIdx >= st.plan.phases.length ? "merge" : "phase"
+          });
+          return;
+        }
+
+        /* Fresh run */
+        let workTask = task.trim();
+        if (!workTask) {
+          send("error", { message: "Missing task text." });
+          return;
+        }
+
+        if (refineEnabled) {
+          const { refined: refinedTask } = await refineUserTask(task);
+          workTask = refinedTask.trim() || task.trim();
+        }
+        send("refined", {
+          type: "refined",
+          original: task,
+          refined: workTask,
+          skipped: !refineEnabled
+        });
+
         send("meta", { ok: true, message: "orchestrator_start" });
 
-        const { plan, degraded } = await buildOrchestratorPlan(task);
+        const { plan, degraded } = await buildOrchestratorPlan(workTask);
         send("plan", {
           reasoning: plan.reasoning,
           complexity: plan.complexity,
@@ -64,10 +230,11 @@ export async function POST(req: Request) {
         });
 
         let urlsFetched = "";
-        const urls = extractUrls(task);
+        const urlSource = [workTask, task].filter((s) => s.trim().length > 0).join("\n\n");
+        const urls = extractUrls(urlSource);
         if (urls.length > 0) {
           send("prefetch", { status: "started", url_count: urls.length });
-          const batch = await fetchPagesFromInput(task);
+          const batch = await fetchPagesFromInput(urlSource);
           urlsFetched = pagesToContextText(batch.pages);
           send("prefetch", {
             status: "done",
@@ -77,69 +244,35 @@ export async function POST(req: Request) {
           });
         }
 
+        if (plan.phases.length === 0) {
+          send("error", { message: "Orchestrator returned no phases." });
+          return;
+        }
+
+        const runId = crypto.randomUUID();
         const artifacts: Record<string, WorkerArtifact> = {};
 
-        for (let pi = 0; pi < plan.phases.length; pi += 1) {
-          const phase = plan.phases[pi];
-          send("phase_start", { phase_index: pi, subtask_ids: phase.map((s) => s.id) });
+        await runSinglePhase(send, workTask, plan, urlsFetched, artifacts, 0);
 
-          await Promise.all(
-            phase.map(async (sub) => {
-              send("agent_start", {
-                id: sub.id,
-                role: sub.role,
-                instruction: sub.instruction,
-                allowed_context_keys: sub.allowed_context_keys
-              });
-              const contextMarkdown = buildContextMarkdown(
-                sub.allowed_context_keys,
-                task,
-                artifacts,
-                urlsFetched
-              );
-              const out = await runSubtaskWorker({
-                task,
-                subtask: sub,
-                contextMarkdown,
-                orchestratorReasoning: plan.reasoning,
-                complexity: plan.complexity
-              });
-              artifacts[sub.id] = out;
-              send("agent_done", {
-                id: sub.id,
-                summary: out.summary,
-                artifact: out.artifact,
-                notes: out.notes,
-                needs_approval: Boolean(out.needs_approval),
-                approval_reason: out.approval_reason ?? null
-              });
-            })
-          );
-        }
-
-        const approvalItems: Array<{ id: string; role: string; reason: string }> = [];
-        for (const [aid, art] of Object.entries(artifacts)) {
-          if (art.needs_approval) {
-            approvalItems.push({
-              id: aid,
-              role: roleForSubtaskId(plan, aid),
-              reason:
-                art.approval_reason?.trim() ||
-                "This step requested human confirmation before you rely on or act on its output."
-            });
-          }
-        }
-        if (approvalItems.length > 0) {
-          send("approval_required", { items: approvalItems });
-        }
-
-        send("merge_start", {});
-        const merged = await mergeOrchestratorOutputs({
-          task,
+        const nextIdx = 1;
+        putPausedRun({
+          runId,
           plan,
-          artifacts
+          workTask,
+          originalTask: task,
+          urlsFetched,
+          artifacts,
+          nextPhaseIndex: nextIdx,
+          degraded,
+          createdAt: Date.now()
         });
-        send("final", { result: merged.result, format: merged.format });
+
+        send("phase_paused", {
+          run_id: runId,
+          completed_phase_index: 0,
+          total_phases: plan.phases.length,
+          next_step: nextIdx >= plan.phases.length ? "merge" : "phase"
+        });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         controller.enqueue(sseEncode("error", { message: msg }));
